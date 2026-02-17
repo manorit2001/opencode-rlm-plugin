@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextLaneStore } from "../lib/context-lanes/store.js";
 import { ContextLaneOrchestrator } from "../lib/context-lanes/orchestrator.js";
+import { scoreContextsForMessage, selectContextLanes } from "../lib/context-lanes/router.js";
 const BASE_CONFIG = {
     enabled: true,
     pressureThreshold: 0.72,
@@ -24,6 +25,11 @@ const BASE_CONFIG = {
     laneSwitchMargin: 0.06,
     laneMaxActive: 8,
     laneSummaryMaxChars: 1200,
+    laneSemanticEnabled: false,
+    laneSemanticTopK: 4,
+    laneSemanticWeight: 0.2,
+    laneSemanticAmbiguityTopScore: 0.62,
+    laneSemanticAmbiguityGap: 0.08,
     laneDbPath: "rlm-context-lanes.sqlite",
     keepRecentMessages: 2,
     maxArchiveChars: 60000,
@@ -47,13 +53,41 @@ function textMessage(id, role, text) {
         parts: [{ type: "text", text }],
     };
 }
-function withStore(testBody) {
+function withStore(testBody, fetchImpl) {
     const dir = mkdtempSync(join(tmpdir(), "rlm-lanes-"));
     const store = new ContextLaneStore(dir, "lane-state.sqlite");
-    const orchestrator = new ContextLaneOrchestrator(store);
+    const orchestrator = new ContextLaneOrchestrator(store, fetchImpl);
     return testBody(store, orchestrator).finally(() => {
         rmSync(dir, { recursive: true, force: true });
     });
+}
+function embeddingForText(text) {
+    const normalized = text.toLowerCase();
+    if (normalized.includes("regression tests") || normalized.includes("coverage")) {
+        return [1, 0];
+    }
+    if (normalized.includes("auth cleanup") || normalized.includes("token refresh")) {
+        return [0, 1];
+    }
+    return [1, 0];
+}
+function semanticMockFetch() {
+    return async (_input, init) => {
+        const bodyRaw = typeof init?.body === "string" ? init.body : "{}";
+        const body = JSON.parse(bodyRaw);
+        if (Array.isArray(body.input)) {
+            const embeddings = body.input.map((text) => embeddingForText(text));
+            return new Response(JSON.stringify({ embeddings }), {
+                status: 200,
+                headers: { "content-type": "application/json" },
+            });
+        }
+        const embedding = embeddingForText(body.prompt ?? "");
+        return new Response(JSON.stringify({ embedding }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+        });
+    };
 }
 test("orchestrator creates first context lane when no lane matches", async () => {
     await withStore(async (_store, orchestrator) => {
@@ -62,7 +96,7 @@ test("orchestrator creates first context lane when no lane matches", async () =>
             textMessage("m1", "assistant", "Legacy log line"),
             textMessage("m2", "user", "Need backend migration updates"),
         ];
-        const routed = orchestrator.route({
+        const routed = await orchestrator.route({
             sessionID: "session-a",
             messageID: "m2",
             latestUserText: "Need backend migration updates",
@@ -90,7 +124,7 @@ test("orchestrator supports multi-lane relevance and lane-scoped history", async
             textMessage("m2", "assistant", "Update bridge tests and migration checks for keyless mode."),
             textMessage("m3", "user", "Finalize backend migration and update bridge tests."),
         ];
-        const routed = orchestrator.route({
+        const routed = await orchestrator.route({
             sessionID: "session-b",
             messageID: "m3",
             latestUserText: "Finalize backend migration and update bridge tests.",
@@ -118,7 +152,7 @@ test("orchestrator tracks active lane switches and emits switch events", async (
             textMessage("c1", "assistant", "Keep backend default opencode and preserve cleanup in finally."),
             textMessage("c2", "user", "Finalize backend migration now."),
         ];
-        const routeA = orchestrator.route({
+        const routeA = await orchestrator.route({
             sessionID: "session-c",
             messageID: "c2",
             latestUserText: "Finalize backend migration now.",
@@ -133,7 +167,7 @@ test("orchestrator tracks active lane switches and emits switch events", async (
             textMessage("c3", "assistant", "Bridge tests should cover keyless migration behavior."),
             textMessage("c4", "user", "Update regression tests and bridge checks before merge."),
         ];
-        const routeB = orchestrator.route({
+        const routeB = await orchestrator.route({
             sessionID: "session-c",
             messageID: "c4",
             latestUserText: "Update regression tests and bridge checks before merge.",
@@ -164,7 +198,7 @@ test("manual override pins primary lane until expiry", async () => {
             textMessage("d1", "assistant", "Bridge tests should be expanded."),
             textMessage("d2", "user", "Update regression tests and bridge checks."),
         ];
-        const duringOverride = orchestrator.route({
+        const duringOverride = await orchestrator.route({
             sessionID: "session-d",
             messageID: "d2",
             latestUserText: "Update regression tests and bridge checks.",
@@ -173,7 +207,7 @@ test("manual override pins primary lane until expiry", async () => {
             now: now + 15_000,
         });
         assert.equal(duringOverride.selection.primaryContextID, backend.id);
-        const afterExpiry = orchestrator.route({
+        const afterExpiry = await orchestrator.route({
             sessionID: "session-d",
             messageID: "d3",
             latestUserText: "Update regression tests and bridge checks.",
@@ -195,7 +229,7 @@ test("orchestrator falls back to full history when lane-specific history is too 
             textMessage("e4", "user", "Finalize backend migration."),
         ];
         store.saveMemberships("session-e", "e4", [{ contextID: backend.id, relevance: 0.8, isPrimary: true }], now - 5_000);
-        const routed = orchestrator.route({
+        const routed = await orchestrator.route({
             sessionID: "session-e",
             messageID: "e4",
             latestUserText: "Finalize backend migration.",
@@ -208,4 +242,66 @@ test("orchestrator falls back to full history when lane-specific history is too 
             .filter((id) => typeof id === "string");
         assert.deepEqual(routedIDs, ["e1", "e2", "e3", "e4"]);
     });
+});
+test("orchestrator applies semantic rerank for ambiguous lexical candidates", async () => {
+    await withStore(async (store, orchestrator) => {
+        const now = Date.now();
+        const authLane = store.createContext("session-f", "Auth Cleanup", "- auth cleanup token refresh and migration checklist", now - 60_000);
+        const testsLane = store.createContext("session-f", "Regression Tests", "- regression tests coverage migration checklist", now - 60_000);
+        const history = [
+            textMessage("f1", "assistant", "We need migration checklist updates."),
+            textMessage("f2", "user", "Finalize migration checklist and coverage updates."),
+        ];
+        const routed = await orchestrator.route({
+            sessionID: "session-f",
+            messageID: "f2",
+            latestUserText: "Finalize migration checklist and coverage updates.",
+            history,
+            config: {
+                ...BASE_CONFIG,
+                laneSemanticEnabled: true,
+                laneSemanticWeight: 0.5,
+                laneSemanticAmbiguityTopScore: 0.99,
+                laneSemanticAmbiguityGap: 0.2,
+            },
+            now,
+        });
+        assert.equal(routed.selection.primaryContextID, testsLane.id);
+        assert.notEqual(routed.selection.primaryContextID, authLane.id);
+    }, semanticMockFetch());
+});
+test("orchestrator falls back to lexical selection when semantic embedding fails", async () => {
+    let fetchCalls = 0;
+    const failingFetch = async () => {
+        fetchCalls += 1;
+        throw new Error("embedding service unavailable");
+    };
+    await withStore(async (store, orchestrator) => {
+        const now = Date.now();
+        const backendLane = store.createContext("session-g", "Backend Migration", "- backend migration and bridge cleanup in finally", now - 40_000);
+        store.createContext("session-g", "Regression Tests", "- regression tests and ci updates", now - 40_000);
+        const latestUserText = "Finalize backend migration and cleanup in finally";
+        const history = [textMessage("g1", "user", latestUserText)];
+        const config = {
+            ...BASE_CONFIG,
+            laneSemanticEnabled: true,
+            laneSemanticAmbiguityTopScore: 0.99,
+            laneSemanticAmbiguityGap: 0.3,
+            lanePrimaryThreshold: 0.2,
+        };
+        const contexts = store.listActiveContexts("session-g", config.laneMaxActive);
+        const lexicalScores = scoreContextsForMessage(latestUserText, contexts, now);
+        const expected = selectContextLanes(lexicalScores, null, config);
+        const routed = await orchestrator.route({
+            sessionID: "session-g",
+            messageID: "g1",
+            latestUserText,
+            history,
+            config,
+            now,
+        });
+        assert.equal(fetchCalls > 0, true);
+        assert.equal(routed.selection.primaryContextID, expected.primaryContextID);
+        assert.equal(routed.selection.primaryContextID, backendLane.id);
+    }, failingFetch);
 });

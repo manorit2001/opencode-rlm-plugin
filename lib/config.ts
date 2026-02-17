@@ -19,6 +19,11 @@ export const DEFAULT_CONFIG: RecursiveConfig = {
   laneSwitchMargin: 0.06,
   laneMaxActive: 8,
   laneSummaryMaxChars: 1200,
+  laneSemanticEnabled: false,
+  laneSemanticTopK: 4,
+  laneSemanticWeight: 0.2,
+  laneSemanticAmbiguityTopScore: 0.62,
+  laneSemanticAmbiguityGap: 0.08,
   laneDbPath: ".opencode/rlm-context-lanes.sqlite",
   keepRecentMessages: 8,
   maxArchiveChars: 60000,
@@ -162,6 +167,35 @@ export function getConfig(): RecursiveConfig {
     200,
     Math.floor(readNumber("RLM_PLUGIN_LANES_SUMMARY_MAX_CHARS", DEFAULT_CONFIG.laneSummaryMaxChars)),
   )
+  const laneSemanticEnabled = readBoolean(
+    "RLM_PLUGIN_LANES_SEMANTIC_ENABLED",
+    DEFAULT_CONFIG.laneSemanticEnabled,
+  )
+  const laneSemanticTopK = Math.max(
+    2,
+    Math.floor(readNumber("RLM_PLUGIN_LANES_SEMANTIC_TOP_K", DEFAULT_CONFIG.laneSemanticTopK)),
+  )
+  const laneSemanticWeight = clamp(
+    readNumber("RLM_PLUGIN_LANES_SEMANTIC_WEIGHT", DEFAULT_CONFIG.laneSemanticWeight),
+    0,
+    1,
+  )
+  const laneSemanticAmbiguityTopScore = clamp(
+    readNumber(
+      "RLM_PLUGIN_LANES_SEMANTIC_AMBIGUITY_TOP_SCORE",
+      DEFAULT_CONFIG.laneSemanticAmbiguityTopScore,
+    ),
+    0.05,
+    0.99,
+  )
+  const laneSemanticAmbiguityGap = clamp(
+    readNumber(
+      "RLM_PLUGIN_LANES_SEMANTIC_AMBIGUITY_GAP",
+      DEFAULT_CONFIG.laneSemanticAmbiguityGap,
+    ),
+    0,
+    0.5,
+  )
   const laneDbPath = readString("RLM_PLUGIN_LANES_DB_PATH", DEFAULT_CONFIG.laneDbPath)
   const keepRecentMessages = Math.max(
     2,
@@ -218,6 +252,11 @@ export function getConfig(): RecursiveConfig {
     laneSwitchMargin,
     laneMaxActive,
     laneSummaryMaxChars,
+    laneSemanticEnabled,
+    laneSemanticTopK,
+    laneSemanticWeight,
+    laneSemanticAmbiguityTopScore,
+    laneSemanticAmbiguityGap,
     laneDbPath,
     keepRecentMessages,
     maxArchiveChars,

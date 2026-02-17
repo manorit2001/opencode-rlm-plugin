@@ -53,6 +53,42 @@ export function scoreContextsForMessage(messageText, contexts, now) {
 function scoreByContextID(scores) {
     return new Map(scores.map((score) => [score.contextID, score.score]));
 }
+export function shouldRunSemanticRerank(scores, config) {
+    if (!config.laneSemanticEnabled) {
+        return false;
+    }
+    if (scores.length < 2) {
+        return false;
+    }
+    const top = scores[0];
+    const second = scores[1];
+    if (!top || !second) {
+        return false;
+    }
+    const gap = top.score - second.score;
+    return top.score <= config.laneSemanticAmbiguityTopScore || gap <= config.laneSemanticAmbiguityGap;
+}
+export function mergeSemanticScores(scores, semanticByContextID, config) {
+    if (scores.length === 0) {
+        return scores;
+    }
+    const merged = scores.map((score) => {
+        const semantic = semanticByContextID.get(score.contextID) ?? 0;
+        return {
+            ...score,
+            score: clamp01(score.score + config.laneSemanticWeight * clamp01(semantic)),
+        };
+    });
+    return merged.sort((left, right) => {
+        if (right.score !== left.score) {
+            return right.score - left.score;
+        }
+        if (right.title !== left.title) {
+            return left.title.localeCompare(right.title);
+        }
+        return left.contextID.localeCompare(right.contextID);
+    });
+}
 export function selectContextLanes(scores, currentPrimaryContextID, config) {
     if (scores.length === 0) {
         return {

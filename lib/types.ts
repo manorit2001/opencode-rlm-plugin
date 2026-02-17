@@ -45,6 +45,11 @@ export interface RecursiveConfig {
   laneSwitchMargin: number
   laneMaxActive: number
   laneSummaryMaxChars: number
+  laneSemanticEnabled: boolean
+  laneSemanticTopK: number
+  laneSemanticWeight: number
+  laneSemanticAmbiguityTopScore: number
+  laneSemanticAmbiguityGap: number
   laneDbPath: string
   keepRecentMessages: number
   maxArchiveChars: number

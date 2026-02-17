@@ -1,6 +1,11 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { scoreContextsForMessage, selectContextLanes } from "../lib/context-lanes/router.js"
+import {
+  mergeSemanticScores,
+  scoreContextsForMessage,
+  selectContextLanes,
+  shouldRunSemanticRerank,
+} from "../lib/context-lanes/router.js"
 import type { ContextLane } from "../lib/context-lanes/types.js"
 import type { RecursiveConfig } from "../lib/types.js"
 
@@ -23,6 +28,11 @@ const BASE_CONFIG: RecursiveConfig = {
   laneSwitchMargin: 0.06,
   laneMaxActive: 8,
   laneSummaryMaxChars: 1200,
+  laneSemanticEnabled: false,
+  laneSemanticTopK: 4,
+  laneSemanticWeight: 0.2,
+  laneSemanticAmbiguityTopScore: 0.62,
+  laneSemanticAmbiguityGap: 0.08,
   laneDbPath: ".opencode/rlm-context-lanes.sqlite",
   keepRecentMessages: 8,
   maxArchiveChars: 60000,
@@ -178,4 +188,43 @@ test("router avoids false matches on short noisy tokens", () => {
 
   assert.equal(selected.primaryContextID, null)
   assert.deepEqual(selected.secondaryContextIDs, [])
+})
+
+test("router triggers semantic rerank only for ambiguous lexical scores", () => {
+  const ambiguous = shouldRunSemanticRerank(
+    [
+      { contextID: "a", score: 0.52, title: "A" },
+      { contextID: "b", score: 0.48, title: "B" },
+    ],
+    { ...BASE_CONFIG, laneSemanticEnabled: true },
+  )
+  const confident = shouldRunSemanticRerank(
+    [
+      { contextID: "a", score: 0.81, title: "A" },
+      { contextID: "b", score: 0.54, title: "B" },
+    ],
+    { ...BASE_CONFIG, laneSemanticEnabled: true },
+  )
+
+  assert.equal(ambiguous, true)
+  assert.equal(confident, false)
+})
+
+test("router merges semantic similarity as bounded boost", () => {
+  const lexicalScores = [
+    { contextID: "backend", score: 0.56, title: "Backend" },
+    { contextID: "tests", score: 0.55, title: "Tests" },
+  ]
+  const merged = mergeSemanticScores(
+    lexicalScores,
+    new Map([
+      ["backend", 0.05],
+      ["tests", 0.95],
+    ]),
+    { ...BASE_CONFIG, laneSemanticEnabled: true, laneSemanticWeight: 0.4 },
+  )
+
+  assert.equal(merged[0]?.contextID, "tests")
+  assert.equal(merged[0]?.score > lexicalScores[0].score, true)
+  assert.equal(merged[1]?.score <= 1, true)
 })

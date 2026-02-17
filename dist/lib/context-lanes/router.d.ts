@@ -6,5 +6,7 @@ interface LaneSelectionCandidate {
     scores: ContextLaneScore[];
 }
 export declare function scoreContextsForMessage(messageText: string, contexts: ContextLane[], now: number): ContextLaneScore[];
+export declare function shouldRunSemanticRerank(scores: ContextLaneScore[], config: RecursiveConfig): boolean;
+export declare function mergeSemanticScores(scores: ContextLaneScore[], semanticByContextID: Map<string, number>, config: RecursiveConfig): ContextLaneScore[];
 export declare function selectContextLanes(scores: ContextLaneScore[], currentPrimaryContextID: string | null, config: RecursiveConfig): LaneSelectionCandidate;
 export {};

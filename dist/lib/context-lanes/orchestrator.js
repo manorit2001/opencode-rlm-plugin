@@ -1,4 +1,5 @@
-import { scoreContextsForMessage, selectContextLanes } from "./router.js";
+import { mergeSemanticScores, scoreContextsForMessage, selectContextLanes, shouldRunSemanticRerank, } from "./router.js";
+import { computeSemanticSimilaritiesForTopCandidates } from "./semantic.js";
 function cleanLine(input) {
     return input.replace(/\s+/g, " ").trim();
 }
@@ -79,8 +80,10 @@ function contextForID(contexts, contextID) {
 }
 export class ContextLaneOrchestrator {
     store;
-    constructor(store) {
+    fetchImpl;
+    constructor(store, fetchImpl = fetch) {
         this.store = store;
+        this.fetchImpl = fetchImpl;
     }
     currentPrimaryContextID(sessionID) {
         return this.store.latestPrimaryContextID(sessionID);
@@ -88,11 +91,18 @@ export class ContextLaneOrchestrator {
     activeContextCount(sessionID) {
         return this.store.countActiveContexts(sessionID);
     }
-    route(input) {
+    async route(input) {
         const { sessionID, messageID, latestUserText, history, config, now } = input;
         const contexts = this.store.listActiveContexts(sessionID, config.laneMaxActive);
         const previousPrimaryContextID = this.store.latestPrimaryContextID(sessionID);
-        const scoreRows = scoreContextsForMessage(latestUserText, contexts, now);
+        let scoreRows = scoreContextsForMessage(latestUserText, contexts, now);
+        if (shouldRunSemanticRerank(scoreRows, config)) {
+            const contextByID = new Map(contexts.map((context) => [context.id, context]));
+            const semanticByContextID = await computeSemanticSimilaritiesForTopCandidates(latestUserText, scoreRows, contextByID, config, this.fetchImpl);
+            if (semanticByContextID.size > 0) {
+                scoreRows = mergeSemanticScores(scoreRows, semanticByContextID, config);
+            }
+        }
         const scoreMap = toScoreMap(scoreRows);
         const selected = selectContextLanes(scoreRows, previousPrimaryContextID, config);
         const overrideContextID = this.store.getManualOverride(sessionID, now);

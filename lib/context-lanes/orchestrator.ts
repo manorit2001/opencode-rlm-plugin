@@ -1,5 +1,11 @@
 import type { ChatMessage } from "../types.js"
-import { scoreContextsForMessage, selectContextLanes } from "./router.js"
+import {
+  mergeSemanticScores,
+  scoreContextsForMessage,
+  selectContextLanes,
+  shouldRunSemanticRerank,
+} from "./router.js"
+import { computeSemanticSimilaritiesForTopCandidates } from "./semantic.js"
 import { ContextLaneStore } from "./store.js"
 import type {
   ContextLane,
@@ -111,7 +117,10 @@ function contextForID(contexts: ContextLane[], contextID: string): ContextLane |
 }
 
 export class ContextLaneOrchestrator {
-  constructor(private readonly store: ContextLaneStore) {}
+  constructor(
+    private readonly store: ContextLaneStore,
+    private readonly fetchImpl: typeof fetch = fetch,
+  ) {}
 
   currentPrimaryContextID(sessionID: string): string | null {
     return this.store.latestPrimaryContextID(sessionID)
@@ -121,11 +130,27 @@ export class ContextLaneOrchestrator {
     return this.store.countActiveContexts(sessionID)
   }
 
-  route(input: ContextRoutingInput): ContextRoutingResult {
+  async route(input: ContextRoutingInput): Promise<ContextRoutingResult> {
     const { sessionID, messageID, latestUserText, history, config, now } = input
     const contexts = this.store.listActiveContexts(sessionID, config.laneMaxActive)
     const previousPrimaryContextID = this.store.latestPrimaryContextID(sessionID)
-    const scoreRows = scoreContextsForMessage(latestUserText, contexts, now)
+    let scoreRows = scoreContextsForMessage(latestUserText, contexts, now)
+
+    if (shouldRunSemanticRerank(scoreRows, config)) {
+      const contextByID = new Map(contexts.map((context) => [context.id, context]))
+      const semanticByContextID = await computeSemanticSimilaritiesForTopCandidates(
+        latestUserText,
+        scoreRows,
+        contextByID,
+        config,
+        this.fetchImpl,
+      )
+
+      if (semanticByContextID.size > 0) {
+        scoreRows = mergeSemanticScores(scoreRows, semanticByContextID, config)
+      }
+    }
+
     const scoreMap = toScoreMap(scoreRows)
 
     const selected = selectContextLanes(scoreRows, previousPrimaryContextID, config)

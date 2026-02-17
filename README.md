@@ -190,6 +190,11 @@ Lane utilities (plugin tools):
 - `RLM_PLUGIN_LANES_SWITCH_MARGIN` (default `0.06`)
 - `RLM_PLUGIN_LANES_MAX_ACTIVE` (default `8`)
 - `RLM_PLUGIN_LANES_SUMMARY_MAX_CHARS` (default `1200`)
+- `RLM_PLUGIN_LANES_SEMANTIC_ENABLED` (default `0`)
+- `RLM_PLUGIN_LANES_SEMANTIC_TOP_K` (default `4`)
+- `RLM_PLUGIN_LANES_SEMANTIC_WEIGHT` (default `0.2`)
+- `RLM_PLUGIN_LANES_SEMANTIC_AMBIGUITY_TOP_SCORE` (default `0.62`)
+- `RLM_PLUGIN_LANES_SEMANTIC_AMBIGUITY_GAP` (default `0.08`)
 - `RLM_PLUGIN_LANES_DB_PATH` (default `.opencode/rlm-context-lanes.sqlite`)
 
 ## Visible Narrowing Test

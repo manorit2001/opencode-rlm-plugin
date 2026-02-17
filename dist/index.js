@@ -201,7 +201,7 @@ const plugin = (async (ctx) => {
             const latestUserText = textFromParts(parts) || latestUserTextFromHistory(history);
             let historyForTransform = history;
             if (config.laneRoutingEnabled && latestUserText.length > 0) {
-                const routed = laneOrchestrator.route({
+                const routed = await laneOrchestrator.route({
                     sessionID: output.message.sessionID,
                     messageID: output.message.id,
                     latestUserText,
