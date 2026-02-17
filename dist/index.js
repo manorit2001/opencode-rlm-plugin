@@ -111,6 +111,33 @@ function latestUserTextFromHistory(history) {
     }
     return "";
 }
+function formatContextsOutput(laneOrchestrator, sessionID, laneMaxActive) {
+    const contexts = laneOrchestrator.listContexts(sessionID, laneMaxActive);
+    const activeCount = laneOrchestrator.activeContextCount(sessionID);
+    const primaryContextID = laneOrchestrator.currentPrimaryContextID(sessionID);
+    if (contexts.length === 0) {
+        return "No active contexts yet. A new context lane will be created automatically on the next routed message.";
+    }
+    const lines = [`Active contexts: ${activeCount}`, `Primary context: ${primaryContextID ?? "none"}`, "", "Contexts:"];
+    for (const context of contexts) {
+        const marker = context.id === primaryContextID ? "*" : "-";
+        const summary = context.summary.replace(/\s+/g, " ").slice(0, 120);
+        lines.push(`${marker} ${context.id} | ${context.title} | msgs=${context.msgCount} | last=${context.lastActiveAt} | ${summary}`);
+    }
+    return lines.join("\n");
+}
+function formatSwitchEventsOutput(laneOrchestrator, sessionID, limit) {
+    const events = laneOrchestrator.listSwitchEvents(sessionID, Math.min(limit, 50));
+    if (events.length === 0) {
+        return "No context switch events recorded yet.";
+    }
+    return events
+        .map((event) => {
+        const from = event.from ?? "none";
+        return `${event.at}: ${from} -> ${event.to} (confidence=${event.confidence.toFixed(3)}, reason=${event.reason})`;
+    })
+        .join("\n");
+}
 const plugin = (async (ctx) => {
     const config = getConfig();
     const laneStore = new ContextLaneStore(ctx.directory, config.laneDbPath);
@@ -122,24 +149,7 @@ const plugin = (async (ctx) => {
                 description: "Show active context lanes and current primary lane",
                 args: {},
                 execute: async (_args, tctx) => {
-                    const contexts = laneOrchestrator.listContexts(tctx.sessionID, config.laneMaxActive);
-                    const activeCount = laneOrchestrator.activeContextCount(tctx.sessionID);
-                    const primaryContextID = laneOrchestrator.currentPrimaryContextID(tctx.sessionID);
-                    if (contexts.length === 0) {
-                        return "No active contexts yet. A new context lane will be created automatically on the next routed message.";
-                    }
-                    const lines = [
-                        `Active contexts: ${activeCount}`,
-                        `Primary context: ${primaryContextID ?? "none"}`,
-                        "",
-                        "Contexts:",
-                    ];
-                    for (const context of contexts) {
-                        const marker = context.id === primaryContextID ? "*" : "-";
-                        const summary = context.summary.replace(/\s+/g, " ").slice(0, 120);
-                        lines.push(`${marker} ${context.id} | ${context.title} | msgs=${context.msgCount} | last=${context.lastActiveAt} | ${summary}`);
-                    }
-                    return lines.join("\n");
+                    return formatContextsOutput(laneOrchestrator, tctx.sessionID, config.laneMaxActive);
                 },
             }),
             "contexts-switch": tool({
@@ -171,17 +181,7 @@ const plugin = (async (ctx) => {
                     limit: tool.schema.number().int().positive().optional(),
                 },
                 execute: async (args, tctx) => {
-                    const limit = Math.min(args.limit ?? 10, 50);
-                    const events = laneOrchestrator.listSwitchEvents(tctx.sessionID, limit);
-                    if (events.length === 0) {
-                        return "No context switch events recorded yet.";
-                    }
-                    return events
-                        .map((event) => {
-                        const from = event.from ?? "none";
-                        return `${event.at}: ${from} -> ${event.to} (confidence=${event.confidence.toFixed(3)}, reason=${event.reason})`;
-                    })
-                        .join("\n");
+                    return formatSwitchEventsOutput(laneOrchestrator, tctx.sessionID, args.limit ?? 10);
                 },
             }),
             "contexts-stats": tool({
