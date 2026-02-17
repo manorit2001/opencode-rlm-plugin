@@ -9,6 +9,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
+    "test:live-lanes": "RLM_PLUGIN_LIVE_LANE_CLI_TEST=1 node --import tsx --test tests/context-lanes-live-cli.test.ts",
     "test:verbose-narrowing": "RLM_TEST_VERBOSE=1 node --import tsx --test tests/narrowing-visible.test.ts",
     "test:verbose-trajectory": "RLM_TEST_VERBOSE=1 RLM_TEST_SHOW_TRAJECTORY=1 node --import tsx --test tests/narrowing-visible.test.ts"
   },
