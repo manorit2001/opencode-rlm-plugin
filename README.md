@@ -12,6 +12,8 @@ This plugin integrates the official Recursive Language Models library (`rlms`, i
 - The bridge uses a simple tiered policy:
   - `shallow` tier: lower recursion budget (`RLM_PLUGIN_SHALLOW_MAX_DEPTH`, `RLM_PLUGIN_SHALLOW_MAX_ITERATIONS`).
   - `deep` tier: full recursion budget (`RLM_PLUGIN_MAX_DEPTH`, `RLM_PLUGIN_MAX_ITERATIONS`) only when pressure is very high and current goal is dense.
+- Optional drift gate (embeddings): when enabled, the plugin can trigger focused-context generation even below main pressure threshold if semantic drift is detected between recent context and archived context.
+- Optional context lanes (multi-context buckets): each incoming message is scored against all active lanes, can match multiple lanes, and lane-scoped history is used for focused-context generation.
 - RLM returns a recursive focused context artifact.
 - The plugin prepends that artifact to the current user text message as a focused context block.
 
@@ -20,6 +22,8 @@ This is intentionally simple: RLM is the engine, OpenCode plugin is the integrat
 ## Architecture
 
 See `ARCHITECTURE_UML.md` for component and sequence UML diagrams.
+
+For lane-based routing architecture and data flow diagrams, see `docs/CONTEXT_LANES_ARCHITECTURE.md`.
 
 ## Install and Enable in OpenCode
 
@@ -107,6 +111,51 @@ pip install rlms
 
 3. Configure backend credentials expected by your selected RLM backend.
 
+## Optional Drift Gate (Ollama embeddings)
+
+Use this to invoke RLM only when semantic drift is detected, which helps reduce unnecessary compactions and token costs.
+
+Recommended default model:
+
+```bash
+ollama pull embeddinggemma
+```
+
+Fallback model:
+
+```bash
+ollama pull all-minilm
+```
+
+Enable drift gate:
+
+```bash
+export RLM_PLUGIN_DRIFT_ENABLED=1
+export RLM_PLUGIN_DRIFT_PROVIDER=ollama
+export RLM_PLUGIN_DRIFT_MODEL=embeddinggemma
+export RLM_PLUGIN_DRIFT_BASE_URL=http://127.0.0.1:11434
+```
+
+Notes:
+
+- The plugin prefers Ollama `POST /api/embed` and falls back to legacy `POST /api/embeddings` when needed.
+- `/api/embed` is preferred for new setups.
+
+## Context Lanes (multi-context routing)
+
+Context lanes keep multiple active work buckets and route each message to the most relevant lane(s).
+
+- Primary lane: highest-confidence context for the current message.
+- Secondary lanes: additional high-similarity lanes for cross-topic overlap.
+- Lane-scoped history: focused-context generation runs on lane-filtered history plus recent messages.
+
+Lane utilities (plugin tools):
+
+- `contexts`: show active lane count, current primary lane, and lane list.
+- `contexts-switch`: temporarily force a primary lane.
+- `contexts-clear-override`: return to automatic lane routing.
+- `contexts-events`: show recent context switch events.
+
 ## Environment Variables
 
 - `RLM_PLUGIN_ENABLED` (`0` disables)
@@ -127,6 +176,21 @@ pip install rlms
 - `RLM_PLUGIN_MAX_DEPTH` (default `3`)
 - `RLM_PLUGIN_MAX_ITERATIONS` (default `8`)
 - `RLM_PLUGIN_TIMEOUT_MS` (default `30000`)
+- `RLM_PLUGIN_DRIFT_ENABLED` (default `0`)
+- `RLM_PLUGIN_DRIFT_MIN_PRESSURE` (default `0.35`)
+- `RLM_PLUGIN_DRIFT_THRESHOLD` (default `0.58`)
+- `RLM_PLUGIN_DRIFT_PROVIDER` (default `ollama`)
+- `RLM_PLUGIN_DRIFT_MODEL` (default `embeddinggemma`)
+- `RLM_PLUGIN_DRIFT_BASE_URL` (default `http://127.0.0.1:11434`)
+- `RLM_PLUGIN_DRIFT_TIMEOUT_MS` (default `5000`)
+- `RLM_PLUGIN_DRIFT_MAX_CHARS` (default `8000`)
+- `RLM_PLUGIN_LANES_ENABLED` (default `1`)
+- `RLM_PLUGIN_LANES_PRIMARY_THRESHOLD` (default `0.38`)
+- `RLM_PLUGIN_LANES_SECONDARY_THRESHOLD` (default `0.3`)
+- `RLM_PLUGIN_LANES_SWITCH_MARGIN` (default `0.06`)
+- `RLM_PLUGIN_LANES_MAX_ACTIVE` (default `8`)
+- `RLM_PLUGIN_LANES_SUMMARY_MAX_CHARS` (default `1200`)
+- `RLM_PLUGIN_LANES_DB_PATH` (default `.opencode/rlm-context-lanes.sqlite`)
 
 ## Visible Narrowing Test
 

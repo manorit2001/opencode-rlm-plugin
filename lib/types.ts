@@ -31,6 +31,21 @@ export interface RecursiveConfig {
   pressureThreshold: number
   deepPressureThreshold: number
   deepGoalMinChars: number
+  driftEmbeddingsEnabled: boolean
+  driftMinPressure: number
+  driftThreshold: number
+  driftEmbeddingProvider: string
+  driftEmbeddingModel: string
+  driftEmbeddingBaseURL: string
+  driftEmbeddingTimeoutMs: number
+  driftEmbeddingMaxChars: number
+  laneRoutingEnabled: boolean
+  lanePrimaryThreshold: number
+  laneSecondaryThreshold: number
+  laneSwitchMargin: number
+  laneMaxActive: number
+  laneSummaryMaxChars: number
+  laneDbPath: string
   keepRecentMessages: number
   maxArchiveChars: number
   maxFocusedContextChars: number

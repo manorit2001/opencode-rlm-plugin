@@ -3,6 +3,21 @@ export const DEFAULT_CONFIG = {
     pressureThreshold: 0.72,
     deepPressureThreshold: 0.86,
     deepGoalMinChars: 120,
+    driftEmbeddingsEnabled: false,
+    driftMinPressure: 0.35,
+    driftThreshold: 0.58,
+    driftEmbeddingProvider: "ollama",
+    driftEmbeddingModel: "embeddinggemma",
+    driftEmbeddingBaseURL: "http://127.0.0.1:11434",
+    driftEmbeddingTimeoutMs: 5000,
+    driftEmbeddingMaxChars: 8000,
+    laneRoutingEnabled: true,
+    lanePrimaryThreshold: 0.38,
+    laneSecondaryThreshold: 0.3,
+    laneSwitchMargin: 0.06,
+    laneMaxActive: 8,
+    laneSummaryMaxChars: 1200,
+    laneDbPath: ".opencode/rlm-context-lanes.sqlite",
     keepRecentMessages: 8,
     maxArchiveChars: 60000,
     maxFocusedContextChars: 4500,
@@ -41,11 +56,43 @@ function readOptionalString(name) {
     }
     return raw.trim();
 }
+function readBoolean(name, fallback) {
+    const raw = process.env[name];
+    if (!raw) {
+        return fallback;
+    }
+    const normalized = raw.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) {
+        return true;
+    }
+    if (["0", "false", "no", "off"].includes(normalized)) {
+        return false;
+    }
+    return fallback;
+}
+function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+}
 export function getConfig() {
     const enabled = process.env.RLM_PLUGIN_ENABLED !== "0";
     const pressureThreshold = Math.max(0.1, readNumber("RLM_PLUGIN_PRESSURE_THRESHOLD", DEFAULT_CONFIG.pressureThreshold));
     const deepPressureThreshold = Math.max(pressureThreshold, readNumber("RLM_PLUGIN_DEEP_PRESSURE_THRESHOLD", DEFAULT_CONFIG.deepPressureThreshold));
     const deepGoalMinChars = Math.max(20, Math.floor(readNumber("RLM_PLUGIN_DEEP_GOAL_MIN_CHARS", DEFAULT_CONFIG.deepGoalMinChars)));
+    const driftEmbeddingsEnabled = readBoolean("RLM_PLUGIN_DRIFT_ENABLED", DEFAULT_CONFIG.driftEmbeddingsEnabled);
+    const driftMinPressure = clamp(readNumber("RLM_PLUGIN_DRIFT_MIN_PRESSURE", DEFAULT_CONFIG.driftMinPressure), 0.05, 1.2);
+    const driftThreshold = clamp(readNumber("RLM_PLUGIN_DRIFT_THRESHOLD", DEFAULT_CONFIG.driftThreshold), 0.05, 0.99);
+    const driftEmbeddingProvider = readString("RLM_PLUGIN_DRIFT_PROVIDER", DEFAULT_CONFIG.driftEmbeddingProvider);
+    const driftEmbeddingModel = readString("RLM_PLUGIN_DRIFT_MODEL", DEFAULT_CONFIG.driftEmbeddingModel);
+    const driftEmbeddingBaseURL = readString("RLM_PLUGIN_DRIFT_BASE_URL", DEFAULT_CONFIG.driftEmbeddingBaseURL);
+    const driftEmbeddingTimeoutMs = Math.max(500, Math.floor(readNumber("RLM_PLUGIN_DRIFT_TIMEOUT_MS", DEFAULT_CONFIG.driftEmbeddingTimeoutMs)));
+    const driftEmbeddingMaxChars = Math.max(1000, Math.floor(readNumber("RLM_PLUGIN_DRIFT_MAX_CHARS", DEFAULT_CONFIG.driftEmbeddingMaxChars)));
+    const laneRoutingEnabled = readBoolean("RLM_PLUGIN_LANES_ENABLED", DEFAULT_CONFIG.laneRoutingEnabled);
+    const lanePrimaryThreshold = clamp(readNumber("RLM_PLUGIN_LANES_PRIMARY_THRESHOLD", DEFAULT_CONFIG.lanePrimaryThreshold), 0.05, 0.99);
+    const laneSecondaryThreshold = Math.min(lanePrimaryThreshold, clamp(readNumber("RLM_PLUGIN_LANES_SECONDARY_THRESHOLD", DEFAULT_CONFIG.laneSecondaryThreshold), 0.01, 0.99));
+    const laneSwitchMargin = clamp(readNumber("RLM_PLUGIN_LANES_SWITCH_MARGIN", DEFAULT_CONFIG.laneSwitchMargin), 0, 0.5);
+    const laneMaxActive = Math.max(1, Math.floor(readNumber("RLM_PLUGIN_LANES_MAX_ACTIVE", DEFAULT_CONFIG.laneMaxActive)));
+    const laneSummaryMaxChars = Math.max(200, Math.floor(readNumber("RLM_PLUGIN_LANES_SUMMARY_MAX_CHARS", DEFAULT_CONFIG.laneSummaryMaxChars)));
+    const laneDbPath = readString("RLM_PLUGIN_LANES_DB_PATH", DEFAULT_CONFIG.laneDbPath);
     const keepRecentMessages = Math.max(2, Math.floor(readNumber("RLM_PLUGIN_KEEP_RECENT", DEFAULT_CONFIG.keepRecentMessages)));
     const maxArchiveChars = Math.max(2000, Math.floor(readNumber("RLM_PLUGIN_MAX_ARCHIVE_CHARS", DEFAULT_CONFIG.maxArchiveChars)));
     const maxFocusedContextChars = Math.max(500, Math.floor(readNumber("RLM_PLUGIN_MAX_FOCUSED_CHARS", DEFAULT_CONFIG.maxFocusedContextChars)));
@@ -66,6 +113,21 @@ export function getConfig() {
         pressureThreshold,
         deepPressureThreshold,
         deepGoalMinChars,
+        driftEmbeddingsEnabled,
+        driftMinPressure,
+        driftThreshold,
+        driftEmbeddingProvider,
+        driftEmbeddingModel,
+        driftEmbeddingBaseURL,
+        driftEmbeddingTimeoutMs,
+        driftEmbeddingMaxChars,
+        laneRoutingEnabled,
+        lanePrimaryThreshold,
+        laneSecondaryThreshold,
+        laneSwitchMargin,
+        laneMaxActive,
+        laneSummaryMaxChars,
+        laneDbPath,
         keepRecentMessages,
         maxArchiveChars,
         maxFocusedContextChars,

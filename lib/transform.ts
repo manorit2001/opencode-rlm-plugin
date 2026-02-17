@@ -1,6 +1,7 @@
 import type { ChatMessage, RecursiveConfig, RLMFocusedContext, TransformRun } from "./types.js"
 import { estimateConversationTokens } from "./token-estimator.js"
 import { generateFocusedContextWithRLM } from "./rlm-bridge.js"
+import { detectContextDriftWithEmbeddings } from "./drift-embeddings.js"
 
 const FOCUSED_CONTEXT_TAG = "[RLM_FOCUSED_CONTEXT]"
 
@@ -11,6 +12,13 @@ export type FocusedContextGenerator = (
   latestGoal: string,
   config: RecursiveConfig,
 ) => Promise<RLMFocusedContext>
+
+export type DriftDetector = (
+  archiveContext: string,
+  recentContext: string,
+  latestGoal: string,
+  config: RecursiveConfig,
+) => Promise<{ drifted: boolean; score: number }>
 
 function resolveContextLimit(contextLimitHint: number | null): number {
   if (typeof contextLimitHint === "number" && Number.isFinite(contextLimitHint) && contextLimitHint > 0) {
@@ -146,12 +154,14 @@ export async function computeFocusedContext(
   config: RecursiveConfig,
   contextLimitHint: number | null,
   generator: FocusedContextGenerator = generateFocusedContextWithRLM,
+  driftDetector: DriftDetector = detectContextDriftWithEmbeddings,
 ): Promise<TransformRun> {
   const tokenEstimate = estimateConversationTokens(messages)
   const contextLimit = resolveContextLimit(contextLimitHint)
   const pressure = tokenEstimate / contextLimit
 
-  if (pressure < config.pressureThreshold) {
+  const pressureTriggered = pressure >= config.pressureThreshold
+  if (!pressureTriggered && !config.driftEmbeddingsEnabled) {
     return {
       compacted: false,
       focusedContext: null,
@@ -183,6 +193,32 @@ export async function computeFocusedContext(
   }
 
   const goal = latestUserGoal(recentMessages)
+  const recentContext = buildArchiveContext(
+    recentMessages,
+    Math.min(config.maxArchiveChars, config.driftEmbeddingMaxChars),
+  )
+
+  let driftTriggered = false
+  if (!pressureTriggered && config.driftEmbeddingsEnabled && pressure >= config.driftMinPressure) {
+    try {
+      const drift = await driftDetector(archiveContext, recentContext, goal, config)
+      driftTriggered = drift.drifted
+    } catch (error) {
+      if (process.env.RLM_PLUGIN_DEBUG === "1") {
+        console.error("RLM plugin drift detector failed", error)
+      }
+    }
+  }
+
+  if (!pressureTriggered && !driftTriggered) {
+    return {
+      compacted: false,
+      focusedContext: null,
+      tokenEstimate,
+      pressure,
+    }
+  }
+
   const recursionTier = resolveRecursionTier(pressure, goal, config)
   const generatorConfig = recursionTier === "deep" ? config : withShallowRecursion(config)
 
