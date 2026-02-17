@@ -6,6 +6,21 @@ const BASE_CONFIG = {
     pressureThreshold: 0.72,
     deepPressureThreshold: 0.86,
     deepGoalMinChars: 120,
+    driftEmbeddingsEnabled: false,
+    driftMinPressure: 0.35,
+    driftThreshold: 0.58,
+    driftEmbeddingProvider: "ollama",
+    driftEmbeddingModel: "embeddinggemma",
+    driftEmbeddingBaseURL: "http://127.0.0.1:11434",
+    driftEmbeddingTimeoutMs: 5000,
+    driftEmbeddingMaxChars: 8000,
+    laneRoutingEnabled: true,
+    lanePrimaryThreshold: 0.38,
+    laneSecondaryThreshold: 0.3,
+    laneSwitchMargin: 0.06,
+    laneMaxActive: 8,
+    laneSummaryMaxChars: 1200,
+    laneDbPath: ".opencode/rlm-context-lanes.sqlite",
     keepRecentMessages: 2,
     maxArchiveChars: 5000,
     maxFocusedContextChars: 400,
@@ -104,6 +119,48 @@ test("computeFocusedContext returns no-op when generator throws", async () => {
     const run = await computeFocusedContext(messages, { ...BASE_CONFIG, pressureThreshold: 0.1, keepRecentMessages: 1 }, 10, async () => {
         throw new Error("bridge failure");
     });
+    assert.equal(run.compacted, false);
+    assert.equal(run.focusedContext, null);
+});
+test("computeFocusedContext can trigger via drift when pressure gate is not met", async () => {
+    const messages = [
+        textMessage("assistant", "Historic context A"),
+        textMessage("assistant", "Historic context B"),
+        textMessage("user", "Need final migration details"),
+    ];
+    let called = false;
+    const run = await computeFocusedContext(messages, {
+        ...BASE_CONFIG,
+        pressureThreshold: 0.95,
+        driftEmbeddingsEnabled: true,
+        driftMinPressure: 0.1,
+        keepRecentMessages: 1,
+    }, 100, async () => {
+        called = true;
+        return { focusedContext: "Drift-triggered focused context" };
+    }, async () => ({ drifted: true, score: 0.92 }));
+    assert.equal(called, true);
+    assert.equal(run.compacted, true);
+    assert.equal(run.focusedContext, "Drift-triggered focused context");
+});
+test("computeFocusedContext does not trigger when drift score says no drift", async () => {
+    const messages = [
+        textMessage("assistant", "Historic context A"),
+        textMessage("assistant", "Historic context B"),
+        textMessage("user", "Need final migration details"),
+    ];
+    let called = false;
+    const run = await computeFocusedContext(messages, {
+        ...BASE_CONFIG,
+        pressureThreshold: 0.95,
+        driftEmbeddingsEnabled: true,
+        driftMinPressure: 0.1,
+        keepRecentMessages: 1,
+    }, 100, async () => {
+        called = true;
+        return { focusedContext: "unexpected" };
+    }, async () => ({ drifted: false, score: 0.18 }));
+    assert.equal(called, false);
     assert.equal(run.compacted, false);
     assert.equal(run.focusedContext, null);
 });
