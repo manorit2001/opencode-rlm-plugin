@@ -9,8 +9,24 @@ import {
 import { ContextLaneOrchestrator } from "./lib/context-lanes/orchestrator.js"
 import { ContextLaneStore } from "./lib/context-lanes/store.js"
 import type { ChatMessage } from "./lib/types.js"
+import { createSessionRuntimeStats, formatRuntimeStats, type SessionRuntimeStats } from "./lib/runtime-stats.js"
 
 const FOCUSED_CONTEXT_TAG = "[RLM_FOCUSED_CONTEXT]"
+
+function statsForSession(
+  statsBySession: Map<string, SessionRuntimeStats>,
+  sessionID: string,
+  now: number,
+): SessionRuntimeStats {
+  const existing = statsBySession.get(sessionID)
+  if (existing) {
+    return existing
+  }
+
+  const created = createSessionRuntimeStats(now)
+  statsBySession.set(sessionID, created)
+  return created
+}
 
 function normalizeMessage(entry: unknown): ChatMessage | null {
   if (!entry || typeof entry !== "object") {
@@ -134,6 +150,7 @@ const plugin: Plugin = (async (ctx) => {
   const config = getConfig()
   const laneStore = new ContextLaneStore(ctx.directory, config.laneDbPath)
   const laneOrchestrator = new ContextLaneOrchestrator(laneStore)
+  const statsBySession = new Map<string, SessionRuntimeStats>()
 
   return {
     tool: {
@@ -217,23 +234,48 @@ const plugin: Plugin = (async (ctx) => {
             .join("\n")
         },
       }),
+      "contexts-stats": tool({
+        description: "Show live RLM runtime stats for this session",
+        args: {},
+        execute: async (_args, tctx) => {
+          const stats = statsBySession.get(tctx.sessionID)
+          if (!stats) {
+            return "No runtime stats yet for this session. Send at least one message first."
+          }
+
+          return formatRuntimeStats(stats, {
+            activeContextCount: laneOrchestrator.activeContextCount(tctx.sessionID),
+            primaryContextID: laneOrchestrator.currentPrimaryContextID(tctx.sessionID),
+            switchEventsCount: laneOrchestrator.listSwitchEvents(tctx.sessionID, 50).length,
+          })
+        },
+      }),
     },
     "chat.message": async (_input, output) => {
       if (!config.enabled) {
         return
       }
 
+      const sessionID = output.message.sessionID
+      const now = Date.now()
+      const sessionStats = statsForSession(statsBySession, sessionID, now)
+      sessionStats.messagesSeen += 1
+      sessionStats.lastSeenAt = now
+
       const parts: unknown[] = output.parts
       if (isInternalFocusedContextPrompt(parts)) {
+        sessionStats.lastDecision = "skipped-internal-focused-context-prompt"
         return
       }
 
       let historyResponse: unknown
       try {
         historyResponse = await ctx.client.session.messages({
-          path: { id: output.message.sessionID },
+          path: { id: sessionID },
         })
       } catch (error) {
+        sessionStats.historyFetchFailures += 1
+        sessionStats.lastDecision = "skipped-history-fetch-failed"
         if (process.env.RLM_PLUGIN_DEBUG === "1") {
           console.error("RLM plugin failed to read session history", error)
         }
@@ -242,21 +284,26 @@ const plugin: Plugin = (async (ctx) => {
 
       const history = normalizeMessages(historyResponse)
       if (history.length === 0) {
+        sessionStats.lastDecision = "skipped-empty-history"
         return
       }
 
       const latestUserText = textFromParts(parts) || latestUserTextFromHistory(history)
       let historyForTransform = history
       if (config.laneRoutingEnabled && latestUserText.length > 0) {
+        sessionStats.laneRoutingRuns += 1
         const routed = await laneOrchestrator.route({
-          sessionID: output.message.sessionID,
+          sessionID,
           messageID: output.message.id,
           latestUserText,
           history,
           config,
-          now: Date.now(),
+          now,
         })
         historyForTransform = routed.laneHistory
+        if (routed.selection.createdNewContext) {
+          sessionStats.laneNewContextCount += 1
+        }
 
         if (process.env.RLM_PLUGIN_DEBUG === "1") {
           const secondaries = routed.selection.secondaryContextIDs.join(",") || "none"
@@ -271,7 +318,7 @@ const plugin: Plugin = (async (ctx) => {
           ? await computeFocusedContext(historyForTransform, config, null, async (archiveContext, latestGoal, runtimeConfig) => {
               return generateFocusedContextWithOpenCodeAuth({
                 client: ctx.client,
-                sessionID: output.message.sessionID,
+                sessionID,
                 archiveContext,
                 latestGoal,
                 config: runtimeConfig,
@@ -279,11 +326,21 @@ const plugin: Plugin = (async (ctx) => {
             })
           : await computeFocusedContext(historyForTransform, config, null)
 
+      sessionStats.transformRuns += 1
+      sessionStats.lastPressure = run.pressure
+      sessionStats.lastTokenEstimate = run.tokenEstimate
+
       if (!run.compacted || !run.focusedContext) {
+        sessionStats.compactionsSkipped += 1
+        sessionStats.lastFocusedChars = 0
+        sessionStats.lastDecision = run.pressure < config.pressureThreshold ? "skipped-pressure" : "skipped-no-focused-context"
         return
       }
 
       prependFocusedContext(parts, run.focusedContext)
+      sessionStats.compactionsApplied += 1
+      sessionStats.lastFocusedChars = run.focusedContext.length
+      sessionStats.lastDecision = "compacted"
     },
   }
 }) satisfies Plugin

@@ -155,6 +155,7 @@ Lane utilities (plugin tools):
 - `contexts-switch`: temporarily force a primary lane.
 - `contexts-clear-override`: return to automatic lane routing.
 - `contexts-events`: show recent context switch events.
+- `contexts-stats`: show live per-session runtime stats (routing runs, compactions, pressure, last decision).
 
 ## Environment Variables
 
