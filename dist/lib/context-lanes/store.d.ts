@@ -1,6 +1,10 @@
 import type { ContextLane, ContextSwitchEvent, MessageContextMembership } from "./types.js";
 export declare class ContextLaneStore {
     private readonly db;
+    private readonly fallbackContexts;
+    private readonly fallbackMemberships;
+    private readonly fallbackSwitches;
+    private readonly fallbackOverrides;
     constructor(baseDirectory: string, dbPath: string);
     private ensureSchema;
     countActiveContexts(sessionID: string): number;
