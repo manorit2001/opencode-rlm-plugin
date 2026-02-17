@@ -138,3 +138,44 @@ test("router keeps only top two qualified secondaries", () => {
   assert.equal(selected.primaryContextID, "primary")
   assert.deepEqual(selected.secondaryContextIDs, ["s1", "s2"])
 })
+
+test("router prefers stronger lexical match over fresher but weak overlap", () => {
+  const now = Date.now()
+  const contexts: ContextLane[] = [
+    lane(
+      "recent-generic",
+      "Recent General",
+      "General planning updates and daily notes",
+      now,
+    ),
+    lane(
+      "older-precise",
+      "Bridge Cleanup",
+      "Preserve bridge cleanup in finally for keyless opencode migration",
+      now - 45 * 60_000,
+    ),
+  ]
+
+  const scores = scoreContextsForMessage(
+    "Ensure keyless opencode migration keeps bridge cleanup in finally.",
+    contexts,
+    now,
+  )
+  const selected = selectContextLanes(scores, null, BASE_CONFIG)
+
+  assert.equal(selected.primaryContextID, "older-precise")
+})
+
+test("router avoids false matches on short noisy tokens", () => {
+  const now = Date.now()
+  const contexts: ContextLane[] = [
+    lane("backend", "Backend", "Backend migration and bridge safety checks", now),
+    lane("ui", "UI", "Typography gradients and UI layout refresh", now),
+  ]
+
+  const scores = scoreContextsForMessage("ui ux ai ml", contexts, now)
+  const selected = selectContextLanes(scores, null, BASE_CONFIG)
+
+  assert.equal(selected.primaryContextID, null)
+  assert.deepEqual(selected.secondaryContextIDs, [])
+})
