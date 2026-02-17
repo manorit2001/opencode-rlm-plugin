@@ -1,0 +1,24 @@
+{
+  "name": "opencode-rlm-plugin",
+  "version": "0.1.0",
+  "description": "Recursive context optimization plugin for OpenCode",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:verbose-narrowing": "RLM_TEST_VERBOSE=1 node --import tsx --test tests/narrowing-visible.test.ts",
+    "test:verbose-trajectory": "RLM_TEST_VERBOSE=1 RLM_TEST_SHOW_TRAJECTORY=1 node --import tsx --test tests/narrowing-visible.test.ts"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=0.13.7"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^0.14.5",
+    "@types/node": "^24.6.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
