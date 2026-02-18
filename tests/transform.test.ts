@@ -1,5 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import { computeFocusedContext } from "../lib/transform.js"
 import type { ChatMessage, RecursiveConfig } from "../lib/types.js"
 
@@ -306,4 +307,71 @@ test("computeFocusedContext keeps post-compaction archive deterministic across r
   assert.equal(archives[0], archives[1])
   assert.ok(archives[0].includes("Focused summary: lane A is the canonical cache vector."))
   assert.equal(archives[0].includes("Historic context: lane scoring details."), false)
+})
+
+test("computeFocusedContext preserves post-compaction KV fingerprint continuity", async () => {
+  const focusedVector = [
+    "[RLM_FOCUSED_CONTEXT]",
+    "Focused summary: bucket-alpha canonical KV vector.",
+    "- preserve lane routing continuity",
+    "- preserve cache hit continuity after compaction",
+    "",
+    "Continue bucket-alpha work.",
+  ].join("\n")
+
+  const replayMessages: ChatMessage[] = [
+    textMessage("assistant", "Pre-compaction detail: stale backlog 2024-Q2."),
+    textMessage("assistant", "Pre-compaction detail: stale cache misses list."),
+    textMessage("user", focusedVector),
+    textMessage("assistant", "RLM loop checkpoint 1: continue bucket-alpha validations."),
+    textMessage("user", "RLM loop checkpoint 2: continue bucket-alpha validations."),
+  ]
+
+  async function captureFingerprint(messages: ChatMessage[]): Promise<{ archive: string; fingerprint: string }> {
+    let archive = ""
+    const run = await computeFocusedContext(
+      messages,
+      {
+        ...BASE_CONFIG,
+        pressureThreshold: 0.1,
+        keepRecentMessages: 1,
+      },
+      20,
+      async (archiveContext) => {
+        archive = archiveContext
+        return { focusedContext: "Focused: keep bucket-alpha continuity stable." }
+      },
+    )
+
+    assert.equal(run.compacted, true)
+    return {
+      archive,
+      fingerprint: createHash("sha256").update(archive).digest("hex"),
+    }
+  }
+
+  const replayA = await captureFingerprint(replayMessages)
+  const replayB = await captureFingerprint(replayMessages)
+
+  assert.equal(replayA.fingerprint, replayB.fingerprint)
+  assert.ok(replayA.archive.includes("Focused summary: bucket-alpha canonical KV vector."))
+  assert.equal(replayA.archive.includes("Pre-compaction detail: stale backlog 2024-Q2."), false)
+  assert.equal(replayA.archive.includes("Pre-compaction detail: stale cache misses list."), false)
+
+  const nextBucketMessages: ChatMessage[] = [
+    textMessage("assistant", "Pre-compaction detail: stale backlog 2024-Q2."),
+    textMessage("assistant", "Pre-compaction detail: stale cache misses list."),
+    textMessage(
+      "user",
+      focusedVector.replace(
+        "Focused summary: bucket-alpha canonical KV vector.",
+        "Focused summary: bucket-beta canonical KV vector.",
+      ),
+    ),
+    textMessage("assistant", "RLM loop checkpoint 1: continue bucket-beta validations."),
+    textMessage("user", "RLM loop checkpoint 2: continue bucket-beta validations."),
+  ]
+
+  const nextBucket = await captureFingerprint(nextBucketMessages)
+  assert.notEqual(nextBucket.fingerprint, replayA.fingerprint)
 })
