@@ -223,3 +223,87 @@ test("computeFocusedContext does not trigger when drift score says no drift", as
   assert.equal(run.compacted, false)
   assert.equal(run.focusedContext, null)
 })
+
+test("computeFocusedContext uses latest compacted context as canonical archive vector", async () => {
+  const messages: ChatMessage[] = [
+    textMessage("user", "Legacy thread detail: old migration checklist."),
+    textMessage("assistant", "Legacy thread detail: old cache notes."),
+    textMessage(
+      "user",
+      [
+        "[RLM_FOCUSED_CONTEXT]",
+        "Focused summary: keep KV continuity for migration lane.",
+        "- preserve context routing stability",
+        "- reuse focused vector after compaction",
+        "",
+        "Continue migration work with stable cache behavior.",
+      ].join("\n"),
+    ),
+    textMessage("assistant", "Post-compaction update: add regression tests for cache continuity."),
+    textMessage("user", "Current goal: validate cache hits after compaction."),
+  ]
+
+  let archiveArg = ""
+  const run = await computeFocusedContext(
+    messages,
+    {
+      ...BASE_CONFIG,
+      pressureThreshold: 0.1,
+      keepRecentMessages: 1,
+    },
+    20,
+    async (archiveContext) => {
+      archiveArg = archiveContext
+      return { focusedContext: "Focused: keep post-compaction cache hits stable." }
+    },
+  )
+
+  assert.equal(run.compacted, true)
+  assert.ok(archiveArg.includes("Focused summary: keep KV continuity for migration lane."))
+  assert.ok(archiveArg.includes("Post-compaction update: add regression tests for cache continuity."))
+  assert.equal(archiveArg.includes("Legacy thread detail: old migration checklist."), false)
+  assert.equal(archiveArg.includes("Legacy thread detail: old cache notes."), false)
+})
+
+test("computeFocusedContext keeps post-compaction archive deterministic across replays", async () => {
+  const messages: ChatMessage[] = [
+    textMessage("assistant", "Historic context: lane scoring details."),
+    textMessage(
+      "user",
+      [
+        "[RLM_FOCUSED_CONTEXT]",
+        "Focused summary: lane A is the canonical cache vector.",
+        "- preserve deterministic arrival order",
+        "",
+        "Continue with lane A validations.",
+      ].join("\n"),
+    ),
+    textMessage("assistant", "Loop checkpoint: keep lane A stable."),
+    textMessage("user", "Loop checkpoint: keep lane A stable."),
+  ]
+
+  const archives: string[] = []
+  async function runOnce(): Promise<void> {
+    await computeFocusedContext(
+      messages,
+      {
+        ...BASE_CONFIG,
+        pressureThreshold: 0.1,
+        keepRecentMessages: 1,
+      },
+      20,
+      async (archiveContext) => {
+        archives.push(archiveContext)
+        return { focusedContext: "Focused: preserve lane A continuity." }
+      },
+    )
+  }
+
+  await runOnce()
+  await runOnce()
+
+  assert.equal(archives.length, 2)
+  assert.equal(archives[0], archives[1])
+  assert.ok(archives[0].includes("Focused summary: lane A is the canonical cache vector."))
+  assert.equal(archives[0].includes("Historic context: lane scoring details."), false)
+})

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os"
 import { ContextLaneStore } from "../lib/context-lanes/store.js"
 import { ContextLaneOrchestrator } from "../lib/context-lanes/orchestrator.js"
 import { scoreContextsForMessage, selectContextLanes } from "../lib/context-lanes/router.js"
+import { estimateConversationTokens } from "../lib/token-estimator.js"
 import type { ChatMessage, RecursiveConfig } from "../lib/types.js"
 
 const BASE_CONFIG: RecursiveConfig = {
@@ -55,6 +56,12 @@ function textMessage(id: string, role: string, text: string): ChatMessage {
     role,
     parts: [{ type: "text", text }],
   }
+}
+
+function messageIDs(messages: ChatMessage[]): string[] {
+  return messages
+    .map((message) => message.id)
+    .filter((id): id is string => typeof id === "string")
 }
 
 function withStore(
@@ -127,6 +134,49 @@ test("orchestrator creates first context lane when no lane matches", async () =>
     assert.equal(contexts.length, 1)
     assert.ok(contexts[0].title.toLowerCase().includes("backend"))
   })
+})
+
+test("orchestrator can create session-backed lane ids and prefixed titles", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rlm-lanes-"))
+  const store = new ContextLaneStore(dir, "lane-state.sqlite")
+  const orchestrator = new ContextLaneOrchestrator(
+    store,
+    fetch,
+    async ({ rootSessionID, laneTitle }) => ({
+      contextID: `child-${rootSessionID}`,
+      laneTitle: `Project: ${laneTitle}`,
+    }),
+  )
+
+  try {
+    const now = Date.now()
+    const history: ChatMessage[] = [textMessage("sb1", "user", "backend migration plan")]
+    const routed = await orchestrator.route({
+      sessionID: "session-backed",
+      messageID: "sb1",
+      latestUserText: "backend migration plan",
+      history,
+      config: BASE_CONFIG,
+      now,
+    })
+
+    assert.equal(routed.selection.primaryContextID, "child-session-backed")
+    const contexts = orchestrator.listContexts("session-backed", 10)
+    assert.equal(contexts.length, 1)
+    assert.equal(contexts[0].id, "child-session-backed")
+    assert.equal(contexts[0].ownerSessionID, "child-session-backed")
+    assert.equal(contexts[0].title.startsWith("Project: "), true)
+    assert.deepEqual(routed.ownerRoutes, [
+      {
+        ownerSessionID: "child-session-backed",
+        contextID: "child-session-backed",
+        contextTitle: contexts[0].title,
+        isPrimary: true,
+      },
+    ])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test("orchestrator supports multi-lane relevance and lane-scoped history", async () => {
@@ -423,4 +473,186 @@ test("orchestrator falls back to lexical selection when semantic embedding fails
     assert.equal(routed.selection.primaryContextID, expected.primaryContextID)
     assert.equal(routed.selection.primaryContextID, backendLane.id)
   }, failingFetch)
+})
+
+test("orchestrator keeps routed lane history in strict arrival order", async () => {
+  await withStore(async (store, orchestrator) => {
+    const now = Date.now()
+    const backend = store.createContext(
+      "session-order",
+      "Backend Migration",
+      "- backend migration plan and rollout checklist",
+      now - 80_000,
+      "backend-order",
+    )
+    const tests = store.createContext(
+      "session-order",
+      "Regression Tests",
+      "- regression tests and migration validation",
+      now - 75_000,
+      "tests-order",
+    )
+
+    store.saveMemberships(
+      "session-order",
+      "o1",
+      [{ contextID: backend.id, relevance: 0.9, isPrimary: true }],
+      now - 70_000,
+    )
+    store.saveMemberships(
+      "session-order",
+      "o2",
+      [{ contextID: tests.id, relevance: 0.9, isPrimary: true }],
+      now - 65_000,
+    )
+    store.saveMemberships(
+      "session-order",
+      "o3",
+      [{ contextID: backend.id, relevance: 0.85, isPrimary: true }],
+      now - 60_000,
+    )
+
+    const history: ChatMessage[] = [
+      textMessage("o1", "assistant", "Backend migration plan draft with rollout checklist."),
+      textMessage("o2", "assistant", "Regression test matrix for migration validation."),
+      textMessage("o3", "assistant", "Backend migration rollout blockers and sequencing."),
+      textMessage("o4", "user", "Finalize backend migration and regression validation tasks."),
+    ]
+
+    const routed = await orchestrator.route({
+      sessionID: "session-order",
+      messageID: "o4",
+      latestUserText: "Finalize backend migration and regression validation tasks.",
+      history,
+      config: {
+        ...BASE_CONFIG,
+        laneSecondaryThreshold: 0.05,
+      },
+      now,
+    })
+
+    assert.deepEqual(messageIDs(routed.laneHistory), ["o1", "o2", "o3", "o4"])
+  })
+})
+
+test("orchestrator produces deterministic lane routing traces for replayed turn order", async () => {
+  async function runTrace(): Promise<
+    Array<{
+      primary: string
+      secondary: string[]
+      laneHistory: string[]
+      laneTokens: number
+    }>
+  > {
+    const trace: Array<{
+      primary: string
+      secondary: string[]
+      laneHistory: string[]
+      laneTokens: number
+    }> = []
+
+    await withStore(async (store, orchestrator) => {
+      const now = 500_000
+      store.createContext(
+        "session-replay",
+        "Backend Migration",
+        "- backend migration work queue and checkpoint tracking",
+        now - 90_000,
+        "backend-replay",
+      )
+      store.createContext(
+        "session-replay",
+        "Regression Tests",
+        "- regression tests, coverage, and migration verification",
+        now - 90_000,
+        "tests-replay",
+      )
+
+      const turns = [
+        "Continue backend migration checklist and rollout.",
+        "RLM loop checkpoint: keep backend migration checklist stable.",
+        "RLM loop checkpoint: keep backend migration checklist stable.",
+      ]
+
+      const history: ChatMessage[] = []
+      for (const [index, text] of turns.entries()) {
+        const messageID = `r${index + 1}`
+        history.push(textMessage(messageID, "user", text))
+
+        const routed = await orchestrator.route({
+          sessionID: "session-replay",
+          messageID,
+          latestUserText: text,
+          history,
+          config: {
+            ...BASE_CONFIG,
+            laneSecondaryThreshold: 0.05,
+          },
+          now: now + index * 1_000,
+        })
+
+        trace.push({
+          primary: routed.selection.primaryContextID,
+          secondary: [...routed.selection.secondaryContextIDs],
+          laneHistory: messageIDs(routed.laneHistory),
+          laneTokens: estimateConversationTokens(routed.laneHistory),
+        })
+      }
+    })
+
+    return trace
+  }
+
+  const traceA = await runTrace()
+  const traceB = await runTrace()
+  assert.deepEqual(traceA, traceB)
+})
+
+test("orchestrator keeps loop-like routing in one lane and bounded by full-history tokens", async () => {
+  await withStore(async (store, orchestrator) => {
+    const now = Date.now()
+    const backend = store.createContext(
+      "session-loop",
+      "Backend Migration",
+      "- backend migration loop checkpoint queue and rollout stability",
+      now - 50_000,
+      "backend-loop",
+    )
+
+    const history: ChatMessage[] = [
+      textMessage("l0", "user", "Continue backend migration rollout and validation."),
+    ]
+    store.saveMemberships(
+      "session-loop",
+      "l0",
+      [{ contextID: backend.id, relevance: 0.95, isPrimary: true }],
+      now - 45_000,
+    )
+
+    let previousLaneTokens = estimateConversationTokens(history)
+    for (let index = 1; index <= 8; index += 1) {
+      const messageID = `l${index}`
+      const loopText = `RLM loop checkpoint ${index}: keep backend migration rollout stable.`
+      history.push(textMessage(messageID, "user", loopText))
+
+      const routed = await orchestrator.route({
+        sessionID: "session-loop",
+        messageID,
+        latestUserText: loopText,
+        history,
+        config: BASE_CONFIG,
+        now: now + index * 1_000,
+      })
+
+      const laneTokens = estimateConversationTokens(routed.laneHistory)
+      const fullHistoryTokens = estimateConversationTokens(history)
+
+      assert.equal(routed.selection.primaryContextID, backend.id)
+      assert.equal(routed.activeContextCount, 1)
+      assert.ok(laneTokens <= fullHistoryTokens)
+      assert.ok(laneTokens >= previousLaneTokens)
+
+      previousLaneTokens = laneTokens
+    }
+  })
 })

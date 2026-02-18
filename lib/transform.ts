@@ -81,11 +81,69 @@ function isFocusedContextMessage(message: ChatMessage): boolean {
   })
 }
 
+function extractCompactedVector(message: ChatMessage): string | null {
+  const parts: unknown[] = Array.isArray(message.parts) ? message.parts : []
+  for (const part of parts) {
+    if (!part || typeof part !== "object") {
+      continue
+    }
+
+    const text = (part as Record<string, unknown>).text
+    if (typeof text !== "string" || !text.startsWith(FOCUSED_CONTEXT_TAG)) {
+      continue
+    }
+
+    const normalized = text
+      .slice(FOCUSED_CONTEXT_TAG.length)
+      .trimStart()
+      .trim()
+    if (normalized.length === 0) {
+      return null
+    }
+
+    if (!normalized.includes("\n\n")) {
+      return null
+    }
+
+    return normalized
+  }
+
+  return null
+}
+
 function buildArchiveContext(messages: ChatMessage[], maxArchiveChars: number): string {
+  let compactedVector: string | null = null
+  let startIndex = 0
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const vector = extractCompactedVector(messages[index])
+    if (vector) {
+      compactedVector = vector
+      startIndex = index + 1
+      break
+    }
+  }
+
   let remaining = maxArchiveChars
   const chunks: string[] = []
 
-  for (let index = messages.length - 1; index >= 0 && remaining > 0; index -= 1) {
+  if (compactedVector) {
+    const serializedVector = `[assistant]\n${compactedVector}`
+    const boundedVector =
+      serializedVector.length > remaining
+        ? serializedVector.slice(serializedVector.length - remaining)
+        : serializedVector
+
+    if (boundedVector.length > 0) {
+      chunks.push(boundedVector)
+      remaining -= boundedVector.length
+    }
+  }
+
+  if (remaining <= 0) {
+    return chunks.join("\n\n")
+  }
+
+  for (let index = messages.length - 1; index >= startIndex && remaining > 0; index -= 1) {
     const message = messages[index]
     if (isFocusedContextMessage(message)) {
       continue
