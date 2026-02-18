@@ -1,0 +1,47 @@
+@startuml
+hide methods
+hide stereotypes
+
+class contexts {
+  +session_id: TEXT (PK part)
+  +id: TEXT (PK part)
+  +title: TEXT
+  +summary: TEXT
+  +status: TEXT(active|archived)
+  +msg_count: INTEGER
+  +last_active_at: INTEGER
+  +created_at: INTEGER
+  +updated_at: INTEGER
+}
+
+class context_memberships {
+  +session_id: TEXT (PK part)
+  +message_id: TEXT (PK part)
+  +context_id: TEXT (PK part)
+  +relevance: REAL
+  +is_primary: INTEGER
+  +created_at: INTEGER
+}
+
+class context_switch_events {
+  +id: INTEGER PK AUTOINCREMENT
+  +session_id: TEXT
+  +message_id: TEXT
+  +from_context_id: TEXT
+  +to_context_id: TEXT
+  +confidence: REAL
+  +reason: TEXT
+  +created_at: INTEGER
+}
+
+class context_overrides {
+  +session_id: TEXT PK
+  +context_id: TEXT
+  +expires_at: INTEGER
+}
+
+contexts "1" -- "many" context_memberships : context_id
+contexts "1" -- "many" context_switch_events : from/to context ids
+contexts "1" -- "0..1" context_overrides : active override
+
+@enduml

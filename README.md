@@ -156,6 +156,7 @@ Lane utilities (plugin tools):
 - `contexts-clear-override`: return to automatic lane routing.
 - `contexts-events`: show recent context switch events.
 - `contexts-stats`: show live per-session runtime stats (routing runs, compactions, pressure, last decision).
+- `contexts-efficiency`: show estimated token savings from lane routing (baseline vs lane-scoped token estimates, savings rate, and switch reason mix).
 
 ## Environment Variables
 

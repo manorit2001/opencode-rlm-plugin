@@ -4,144 +4,17 @@ This document describes the current runtime architecture of the OpenCode RLM plu
 
 ## Component Diagram
 
-```plantuml
-@startuml
-skinparam componentStyle rectangle
+PlantUML sources:
 
-actor "User" as User
-actor "OpenCode Runtime" as Runtime
-
-component "Plugin Entry\nindex.ts" as Entry
-component "Config Loader\nlib/config.ts" as Config
-component "Runtime Stats\nlib/runtime-stats.ts" as Stats
-
-component "Lane Orchestrator\nlib/context-lanes/orchestrator.ts" as Orchestrator
-component "Lane Router\nlib/context-lanes/router.ts" as Router
-component "Lane Semantic Rerank\nlib/context-lanes/semantic.ts" as LaneSemantic
-database "Lane Store (SQLite/fallback)\nlib/context-lanes/store.ts" as LaneStore
-
-component "Transform Engine\nlib/transform.ts" as Transform
-component "Token Estimator\nlib/token-estimator.ts" as Estimator
-component "Drift Detector\nlib/drift-embeddings.ts" as Drift
-
-component "OpenCode Bridge\nlib/opencode-bridge.ts" as OCBridge
-component "Python Bridge\nlib/rlm-bridge.ts" as PyBridge
-node "Python Process" as PythonProc
-component "Official RLM Library\nfrom rlm import RLM" as RLM
-
-component "Embedding Provider\nOllama /api/embed" as Embed
-cloud "Model Backend" as Backend
-database "OpenCode Session API" as SessionAPI
-
-User --> Runtime : sends message / runs tools
-Runtime --> Entry : chat.message + tool hooks
-Entry --> Config : getConfig()
-Entry --> Stats : update counters
-Entry --> SessionAPI : session.messages(sessionID)
-
-Entry --> Orchestrator : route(...) (if lanes enabled)
-Orchestrator --> Router : score contexts
-Router --> LaneSemantic : rerank candidates (if ambiguous)
-LaneSemantic --> Embed : embedding calls
-Orchestrator --> LaneStore : list/update lanes, memberships, switches
-Orchestrator --> Entry : laneHistory + selection
-
-Entry --> Transform : computeFocusedContext(historyForTransform, config)
-Transform --> Estimator : estimateConversationTokens(...)
-Transform --> Drift : detect drift (optional)
-Drift --> Embed : embedding calls
-
-Transform --> OCBridge : generate (backend=opencode)
-OCBridge --> SessionAPI : create temp session + prompt + delete
-OCBridge --> Backend : provider/model call via OpenCode auth
-
-Transform --> PyBridge : generate (backend=python)
-PyBridge --> PythonProc : spawn python -c
-PythonProc --> RLM : RLM(...).completion(prompt)
-RLM --> Backend : recursive completion
-
-OCBridge --> Transform : focusedContext
-PyBridge --> Transform : focusedContext
-Transform --> Entry : TransformRun
-Entry --> Runtime : prepend [RLM_FOCUSED_CONTEXT]
-
-@enduml
-```
+- `docs/uml/architecture-component.puml`
+- `docs/uml/architecture-component.uml`
 
 ## Sequence Diagram
 
-```plantuml
-@startuml
-actor User
-participant "OpenCode Runtime" as Runtime
-participant "Plugin (index.ts)" as Plugin
-database "Session API" as Session
-participant "Lane Orchestrator" as Orchestrator
-database "Lane Store" as LaneStore
-participant "Transform" as Transform
-participant "Drift Detector" as Drift
-participant "Embedding Provider" as Embed
-participant "OpenCode Bridge" as OCBridge
-participant "Python Bridge" as PyBridge
-participant "Model Backend" as Backend
+PlantUML sources:
 
-User -> Runtime : sends message
-Runtime -> Plugin : chat.message(output)
-
-Plugin -> Plugin : skip if internal focused-context prompt
-Plugin -> Session : messages(sessionID)
-Session --> Plugin : history
-
-alt lanes enabled and latest user text exists
-  Plugin -> Orchestrator : route(sessionID, messageID, text, history)
-  Orchestrator -> LaneStore : list active lanes + latest primary
-  Orchestrator -> Orchestrator : lexical scoring
-  alt lexical routing ambiguous and semantic enabled
-    Orchestrator -> Embed : semantic embeddings (top candidates)
-    Embed --> Orchestrator : similarities
-  end
-  Orchestrator -> LaneStore : save memberships/switch events
-  Orchestrator --> Plugin : laneHistory
-else lanes disabled
-  Plugin -> Plugin : use full history
-end
-
-Plugin -> Transform : computeFocusedContext(historyForTransform, config)
-Transform -> Transform : estimate pressure + build archive/recent
-
-alt below pressure threshold and drift enabled
-  Transform -> Drift : detectContextDrift(...)
-  Drift -> Embed : drift embeddings
-  Embed --> Drift : vectors
-  Drift --> Transform : drift assessment
-end
-
-alt no pressure trigger and no drift trigger
-  Transform --> Plugin : compacted=false
-  Plugin --> Runtime : no message changes
-else focused context needed
-  alt backend = opencode
-    Transform -> OCBridge : generateFocusedContextWithOpenCodeAuth(...)
-    OCBridge -> Session : create temp child session + prompt
-    Session -> Backend : model call
-    Backend --> Session : response
-    OCBridge -> Session : delete temp session
-    OCBridge --> Transform : focusedContext
-  else backend = python
-    Transform -> PyBridge : generateFocusedContextWithRLM(...)
-    PyBridge -> Backend : recursive completion via Python RLM
-    Backend --> PyBridge : response
-    PyBridge --> Transform : focusedContext
-  end
-
-  Transform --> Plugin : compacted=true + focusedContext
-  Plugin -> Plugin : prepend [RLM_FOCUSED_CONTEXT]
-  Plugin --> Runtime : modified user message parts
-end
-
-Runtime --> User : assistant response uses focused context
-@enduml
-```
+- `docs/uml/architecture-sequence.puml`
+- `docs/uml/architecture-sequence.uml`
 
 ## Module Responsibilities
 

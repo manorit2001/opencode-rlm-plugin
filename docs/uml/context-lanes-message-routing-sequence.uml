@@ -1,0 +1,53 @@
+@startuml
+actor User
+participant "OpenCode Runtime" as Runtime
+participant "Plugin Entry" as Entry
+participant "Lane Orchestrator" as Orch
+participant "Lane Router" as Router
+participant "Semantic Reranker" as Semantic
+database "Lane Store" as Store
+participant "Embedding Provider" as Embed
+participant "Transform" as Transform
+participant "Focused Context Bridge" as Bridge
+
+User -> Runtime : sends message M
+Runtime -> Entry : chat.message(output)
+Entry -> Entry : extract latest user text
+Entry -> Orch : route(sessionID, messageID, text, history)
+
+Orch -> Store : list active lanes + latest primary
+Orch -> Router : lexical scoring
+
+alt ambiguity gate triggered
+  Router -> Semantic : semantic rerank (top K)
+  Semantic -> Embed : embeddings for query + candidate lanes
+  Embed --> Semantic : vectors
+  Semantic --> Router : similarity map
+end
+
+Router --> Orch : primary + secondary lane selection
+Orch -> Store : apply manual override (if active)
+
+alt no primary lane selected
+  Orch -> Store : create new lane
+else lane selected
+  Orch -> Store : update lane summaries
+end
+
+Orch -> Store : save memberships
+Orch -> Store : save switch event (if primary changed)
+Orch -> Store : read memberships for lane history reconstruction
+Orch --> Entry : laneHistory + selection
+
+Entry -> Transform : computeFocusedContext(laneHistory)
+alt compacted
+  Transform -> Bridge : generate focused context
+  Bridge --> Transform : focused_context
+  Transform --> Entry : compacted=true
+  Entry --> Runtime : prepend [RLM_FOCUSED_CONTEXT]
+else no-op
+  Transform --> Entry : compacted=false
+end
+
+Runtime --> User : assistant response
+@enduml

@@ -1,0 +1,70 @@
+@startuml
+actor User
+participant "OpenCode Runtime" as Runtime
+participant "Plugin (index.ts)" as Plugin
+database "Session API" as Session
+participant "Lane Orchestrator" as Orchestrator
+database "Lane Store" as LaneStore
+participant "Transform" as Transform
+participant "Drift Detector" as Drift
+participant "Embedding Provider" as Embed
+participant "OpenCode Bridge" as OCBridge
+participant "Python Bridge" as PyBridge
+participant "Model Backend" as Backend
+
+User -> Runtime : sends message
+Runtime -> Plugin : chat.message(output)
+
+Plugin -> Plugin : skip if internal focused-context prompt
+Plugin -> Session : messages(sessionID)
+Session --> Plugin : history
+
+alt lanes enabled and latest user text exists
+  Plugin -> Orchestrator : route(sessionID, messageID, text, history)
+  Orchestrator -> LaneStore : list active lanes + latest primary
+  Orchestrator -> Orchestrator : lexical scoring
+  alt lexical routing ambiguous and semantic enabled
+    Orchestrator -> Embed : semantic embeddings (top candidates)
+    Embed --> Orchestrator : similarities
+  end
+  Orchestrator -> LaneStore : save memberships/switch events
+  Orchestrator --> Plugin : laneHistory
+else lanes disabled
+  Plugin -> Plugin : use full history
+end
+
+Plugin -> Transform : computeFocusedContext(historyForTransform, config)
+Transform -> Transform : estimate pressure + build archive/recent
+
+alt below pressure threshold and drift enabled
+  Transform -> Drift : detectContextDrift(...)
+  Drift -> Embed : drift embeddings
+  Embed --> Drift : vectors
+  Drift --> Transform : drift assessment
+end
+
+alt no pressure trigger and no drift trigger
+  Transform --> Plugin : compacted=false
+  Plugin --> Runtime : no message changes
+else focused context needed
+  alt backend = opencode
+    Transform -> OCBridge : generateFocusedContextWithOpenCodeAuth(...)
+    OCBridge -> Session : create temp child session + prompt
+    Session -> Backend : model call
+    Backend --> Session : response
+    OCBridge -> Session : delete temp session
+    OCBridge --> Transform : focusedContext
+  else backend = python
+    Transform -> PyBridge : generateFocusedContextWithRLM(...)
+    PyBridge -> Backend : recursive completion via Python RLM
+    Backend --> PyBridge : response
+    PyBridge --> Transform : focusedContext
+  end
+
+  Transform --> Plugin : compacted=true + focusedContext
+  Plugin -> Plugin : prepend [RLM_FOCUSED_CONTEXT]
+  Plugin --> Runtime : modified user message parts
+end
+
+Runtime --> User : assistant response uses focused context
+@enduml

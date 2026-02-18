@@ -1,0 +1,61 @@
+@startuml
+skinparam componentStyle rectangle
+
+actor "User" as User
+actor "OpenCode Runtime" as Runtime
+
+component "Plugin Entry\nindex.ts" as Entry
+component "Config Loader\nlib/config.ts" as Config
+component "Runtime Stats\nlib/runtime-stats.ts" as Stats
+
+component "Lane Orchestrator\nlib/context-lanes/orchestrator.ts" as Orchestrator
+component "Lane Router\nlib/context-lanes/router.ts" as Router
+component "Lane Semantic Rerank\nlib/context-lanes/semantic.ts" as LaneSemantic
+database "Lane Store (SQLite/fallback)\nlib/context-lanes/store.ts" as LaneStore
+
+component "Transform Engine\nlib/transform.ts" as Transform
+component "Token Estimator\nlib/token-estimator.ts" as Estimator
+component "Drift Detector\nlib/drift-embeddings.ts" as Drift
+
+component "OpenCode Bridge\nlib/opencode-bridge.ts" as OCBridge
+component "Python Bridge\nlib/rlm-bridge.ts" as PyBridge
+node "Python Process" as PythonProc
+component "Official RLM Library\nfrom rlm import RLM" as RLM
+
+component "Embedding Provider\nOllama /api/embed" as Embed
+cloud "Model Backend" as Backend
+database "OpenCode Session API" as SessionAPI
+
+User --> Runtime : sends message / runs tools
+Runtime --> Entry : chat.message + tool hooks
+Entry --> Config : getConfig()
+Entry --> Stats : update counters
+Entry --> SessionAPI : session.messages(sessionID)
+
+Entry --> Orchestrator : route(...) (if lanes enabled)
+Orchestrator --> Router : score contexts
+Router --> LaneSemantic : rerank candidates (if ambiguous)
+LaneSemantic --> Embed : embedding calls
+Orchestrator --> LaneStore : list/update lanes, memberships, switches
+Orchestrator --> Entry : laneHistory + selection
+
+Entry --> Transform : computeFocusedContext(historyForTransform, config)
+Transform --> Estimator : estimateConversationTokens(...)
+Transform --> Drift : detect drift (optional)
+Drift --> Embed : embedding calls
+
+Transform --> OCBridge : generate (backend=opencode)
+OCBridge --> SessionAPI : create temp session + prompt + delete
+OCBridge --> Backend : provider/model call via OpenCode auth
+
+Transform --> PyBridge : generate (backend=python)
+PyBridge --> PythonProc : spawn python -c
+PythonProc --> RLM : RLM(...).completion(prompt)
+RLM --> Backend : recursive completion
+
+OCBridge --> Transform : focusedContext
+PyBridge --> Transform : focusedContext
+Transform --> Entry : TransformRun
+Entry --> Runtime : prepend [RLM_FOCUSED_CONTEXT]
+
+@enduml

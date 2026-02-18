@@ -1,0 +1,6 @@
+@startuml
+[*] --> Active
+Active --> Active : routed as primary/secondary
+Active --> Archived : manual/external archival policy
+Archived --> Active : explicit reactivation
+@enduml

@@ -2,6 +2,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin/tool"
 import { getConfig } from "./lib/config.js"
 import { computeFocusedContext } from "./lib/transform.js"
+import { estimateConversationTokens } from "./lib/token-estimator.js"
 import {
   INTERNAL_FOCUSED_CONTEXT_PROMPT_TAG,
   generateFocusedContextWithOpenCodeAuth,
@@ -9,7 +10,12 @@ import {
 import { ContextLaneOrchestrator } from "./lib/context-lanes/orchestrator.js"
 import { ContextLaneStore } from "./lib/context-lanes/store.js"
 import type { ChatMessage } from "./lib/types.js"
-import { createSessionRuntimeStats, formatRuntimeStats, type SessionRuntimeStats } from "./lib/runtime-stats.js"
+import {
+  createSessionRuntimeStats,
+  formatRuntimeStats,
+  formatTokenEfficiencyStats,
+  type SessionRuntimeStats,
+} from "./lib/runtime-stats.js"
 
 const FOCUSED_CONTEXT_TAG = "[RLM_FOCUSED_CONTEXT]"
 
@@ -253,6 +259,24 @@ const plugin: Plugin = (async (ctx) => {
           })
         },
       }),
+      "contexts-efficiency": tool({
+        description: "Show estimated token savings from lane routing",
+        args: {
+          switchWindow: tool.schema.number().int().positive().optional(),
+        },
+        execute: async (args, tctx) => {
+          const stats = statsBySession.get(tctx.sessionID)
+          if (!stats) {
+            return "No runtime stats yet for this session. Send at least one message first."
+          }
+
+          const switchEvents = laneOrchestrator.listSwitchEvents(tctx.sessionID, Math.min(args.switchWindow ?? 50, 200))
+          return formatTokenEfficiencyStats(stats, {
+            activeContextCount: laneOrchestrator.activeContextCount(tctx.sessionID),
+            switchEvents,
+          })
+        },
+      }),
     },
     "chat.message": async (_input, output) => {
       if (!config.enabled) {
@@ -291,6 +315,9 @@ const plugin: Plugin = (async (ctx) => {
         return
       }
 
+      const baselineTokenEstimate = estimateConversationTokens(history)
+      sessionStats.lastBaselineTokenEstimate = baselineTokenEstimate
+
       const latestUserText = textFromParts(parts) || latestUserTextFromHistory(history)
       let historyForTransform = history
       if (config.laneRoutingEnabled && latestUserText.length > 0) {
@@ -314,6 +341,15 @@ const plugin: Plugin = (async (ctx) => {
             `RLM lane routing active=${routed.activeContextCount} primary=${routed.selection.primaryContextID} secondary=${secondaries} created=${routed.selection.createdNewContext}`,
           )
         }
+
+        const laneTokenEstimate = estimateConversationTokens(historyForTransform)
+        const laneSavedTokens = Math.max(0, baselineTokenEstimate - laneTokenEstimate)
+        sessionStats.laneRoutingSamples += 1
+        sessionStats.totalBaselineTokens += baselineTokenEstimate
+        sessionStats.totalLaneScopedTokens += laneTokenEstimate
+        sessionStats.totalLaneSavedTokens += laneSavedTokens
+        sessionStats.lastLaneScopedTokenEstimate = laneTokenEstimate
+        sessionStats.lastLaneSavedTokens = laneSavedTokens
       }
 
       const run =

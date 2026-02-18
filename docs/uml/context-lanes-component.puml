@@ -1,0 +1,41 @@
+@startuml
+skinparam componentStyle rectangle
+
+actor "User" as User
+actor "OpenCode Runtime" as Runtime
+
+component "Plugin Entry\nindex.ts" as Entry
+component "Lane Orchestrator\nlib/context-lanes/orchestrator.ts" as Orchestrator
+component "Lane Router\nlib/context-lanes/router.ts" as Router
+component "Semantic Reranker\nlib/context-lanes/semantic.ts" as Semantic
+database "Lane Store (SQLite/fallback)\nlib/context-lanes/store.ts" as Store
+
+component "Transform Engine\nlib/transform.ts" as Transform
+component "Drift Detector\nlib/drift-embeddings.ts" as Drift
+component "Focused Context Bridge\nlib/opencode-bridge.ts | lib/rlm-bridge.ts" as Bridge
+component "Runtime Stats\nlib/runtime-stats.ts" as Stats
+
+database "OpenCode Session API" as SessionAPI
+component "Embedding Provider\nOllama /api/embed" as Embed
+
+User --> Runtime : message / tool invocation
+Runtime --> Entry : chat.message + lane tools
+
+Entry --> SessionAPI : load full session history
+Entry --> Orchestrator : route(session, message, latest text, history)
+Orchestrator --> Store : read/update lanes, memberships, switches, overrides
+Orchestrator --> Router : lexical scoring + lane selection
+Router --> Semantic : optional rerank (ambiguity gate)
+Semantic --> Embed : embedding calls
+Orchestrator --> Entry : laneHistory + lane selection
+
+Entry --> Transform : computeFocusedContext(laneHistory)
+Transform --> Drift : optional drift check
+Drift --> Embed : embedding calls
+Transform --> Bridge : focused context generation
+Transform --> Stats : transform counters and decision
+Entry --> Stats : message/lane counters
+
+Entry --> Runtime : prepend focused context to outgoing user message
+
+@enduml

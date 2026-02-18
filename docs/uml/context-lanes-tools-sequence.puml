@@ -1,0 +1,25 @@
+@startuml
+actor User
+participant "Runtime" as Runtime
+participant "Plugin Tools" as Tools
+participant "Lane Orchestrator" as Orch
+database "Lane Store" as Store
+
+User -> Runtime : contexts
+Runtime -> Tools : execute `contexts`
+Tools -> Orch : listContexts + currentPrimary
+Orch -> Store : read lane rows
+Tools --> Runtime : active lane list
+
+User -> Runtime : contexts-switch <lane> [ttlMinutes]
+Runtime -> Tools : execute `contexts-switch`
+Tools -> Orch : switchContext(...)
+Orch -> Store : set manual override (expires_at)
+Tools --> Runtime : switch confirmation
+
+User -> Runtime : contexts-events / contexts-clear-override / contexts-stats
+Runtime -> Tools : execute tool
+Tools -> Orch : list events or clear override
+Orch -> Store : query/update override/events
+Tools --> Runtime : formatted response
+@enduml
