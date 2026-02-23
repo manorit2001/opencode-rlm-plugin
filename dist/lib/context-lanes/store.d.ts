@@ -10,6 +10,29 @@ export interface ContextMembershipEvent {
     isPrimary: boolean;
     createdAt: number;
 }
+export interface IntentBucketDeltaChange {
+    contextID: string;
+    previousScore: number;
+    currentScore: number;
+    previousRank: number;
+    currentRank: number;
+    previousBucketType: string;
+    currentBucketType: string;
+}
+export interface MessageIntentBucketDelta {
+    previousMessageID: string | null;
+    previousPrimaryContextID: string | null;
+    currentPrimaryContextID: string | null;
+    primaryChanged: boolean;
+    addedContextIDs: string[];
+    removedContextIDs: string[];
+    changedContexts: IntentBucketDeltaChange[];
+}
+export interface MessageIntentBucketDebug {
+    currentBuckets: MessageIntentBucketAssignment[];
+    previousBuckets: MessageIntentBucketAssignment[];
+    delta: MessageIntentBucketDelta;
+}
 export declare class ContextLaneStore {
     private readonly db;
     private readonly fallbackContexts;
@@ -38,6 +61,8 @@ export declare class ContextLaneStore {
     listSwitchEvents(sessionID: string, limit: number): ContextSwitchEvent[];
     saveIntentBucketAssignments(sessionID: string, messageID: string, assignments: Omit<MessageIntentBucketAssignment, "sessionID" | "messageID" | "createdAt">[], now: number): void;
     listIntentBucketAssignments(sessionID: string, messageID: string, limit: number): MessageIntentBucketAssignment[];
+    private previousIntentBucketMessageID;
+    listIntentBucketAssignmentsWithDelta(sessionID: string, messageID: string, limit: number): MessageIntentBucketDebug;
     appendProgressionStep(sessionID: string, messageID: string, stepType: string, detailJSON: string, now: number): MessageProgressionStep;
     listProgressionSteps(sessionID: string, messageID: string, limit: number): MessageProgressionStep[];
     saveContextSnapshot(sessionID: string, messageID: string, snapshotKind: string, snapshotIndex: number, payloadJSON: string, now: number): ContextSnapshotRecord;

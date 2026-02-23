@@ -292,7 +292,7 @@ export function renderLaneVisualizationHTML(
 
       const visible = index === 0 ? "" : " hidden"
       const safeSessionID = escapeHTML(session.sessionID)
-      return `<section class="session-card${visible}" data-session="${safeSessionID}"><h2>Session <code>${safeSessionID}</code></h2><p class="meta">Last activity: ${toISO(session.lastActivityAt)} | Primary lane: <code>${escapeHTML(session.primaryContextID ?? "none")}</code> | Active lanes: ${session.activeContextCount}</p><h3>Lane Contexts</h3><table><thead><tr><th>Primary</th><th>Context ID</th><th>Title</th><th>Owner Session</th><th>Messages</th><th>Last Active</th><th>Summary</th></tr></thead><tbody>${contextsRows || "<tr><td colspan=\"7\">No contexts for this session.</td></tr>"}</tbody></table><h3>Formation Timeline</h3><table><thead><tr><th>At</th><th>Type</th><th>Context</th><th>Message</th><th>Label</th><th>Detail</th></tr></thead><tbody>${timelineRows || "<tr><td colspan=\"6\">No timeline events for this session.</td></tr>"}</tbody></table><h3>Live Progression Events</h3><table><thead><tr><th>Seq</th><th>At</th><th>Type</th><th>Message</th><th>Details</th></tr></thead><tbody id="progression-${safeSessionID}"><tr><td colspan="5">Waiting for live progression events...</td></tr></tbody></table><h3>Message Debug</h3><pre id="message-debug-${safeSessionID}" class="debug-panel">Select an event row to inspect message intent buckets, progression steps, and context snapshots.</pre></section>`
+      return `<section class="session-card${visible}" data-session="${safeSessionID}"><h2>Session <code>${safeSessionID}</code></h2><p class="meta">Last activity: ${toISO(session.lastActivityAt)} | Primary lane: <code>${escapeHTML(session.primaryContextID ?? "none")}</code> | Active lanes: ${session.activeContextCount}</p><h3>Lane Contexts</h3><table><thead><tr><th>Primary</th><th>Context ID</th><th>Title</th><th>Owner Session</th><th>Messages</th><th>Last Active</th><th>Summary</th></tr></thead><tbody>${contextsRows || "<tr><td colspan=\"7\">No contexts for this session.</td></tr>"}</tbody></table><h3>Formation Timeline</h3><table><thead><tr><th>At</th><th>Type</th><th>Context</th><th>Message</th><th>Label</th><th>Detail</th></tr></thead><tbody>${timelineRows || "<tr><td colspan=\"6\">No timeline events for this session.</td></tr>"}</tbody></table><h3>Live Progression Events</h3><table><thead><tr><th>Seq</th><th>At</th><th>Type</th><th>Message</th><th>Details</th></tr></thead><tbody id="progression-${safeSessionID}"><tr><td colspan="5">Waiting for live progression events...</td></tr></tbody></table><h3>Message Debug</h3><pre id="message-debug-${safeSessionID}" class="debug-panel">Select an event row to inspect bucket changes, request formation scaffolding, and raw debug payload.</pre></section>`
     })
     .join("")
 
@@ -407,6 +407,126 @@ export function renderLaneVisualizationHTML(
           return first ? first.dataset.session : "";
         }
 
+        function asObject(value) {
+          return value && typeof value === "object" ? value : {};
+        }
+
+        function asArray(value) {
+          return Array.isArray(value) ? value : [];
+        }
+
+        function summarizeParts(parts) {
+          const records = asArray(parts);
+          if (records.length === 0) {
+            return "none";
+          }
+
+          const rendered = records.map((record, index) => {
+            const item = asObject(record);
+            const partType = typeof item.type === "string" ? item.type : "unknown";
+            const textChars = typeof item.textChars === "number" ? item.textChars : 0;
+            const textPreview = typeof item.textPreview === "string" ? item.textPreview : "";
+            const preview = textPreview.length > 0 ? ' "' + textPreview + '"' : "";
+            return "#" + index + " " + partType + " chars=" + textChars + preview;
+          });
+
+          return rendered.join(" | ");
+        }
+
+        function formatBucketDelta(delta) {
+          const record = asObject(delta);
+          if (Object.keys(record).length === 0) {
+            return "No bucket delta available yet.";
+          }
+
+          const previousMessageID = typeof record.previousMessageID === "string" ? record.previousMessageID : "none";
+          const previousPrimary = typeof record.previousPrimaryContextID === "string" ? record.previousPrimaryContextID : "none";
+          const currentPrimary = typeof record.currentPrimaryContextID === "string" ? record.currentPrimaryContextID : "none";
+          const primaryChanged = record.primaryChanged === true;
+          const addedContextIDs = asArray(record.addedContextIDs).map((value) => String(value));
+          const removedContextIDs = asArray(record.removedContextIDs).map((value) => String(value));
+          const changedContexts = asArray(record.changedContexts);
+
+          const lines = [
+            "previousMessageID: " + previousMessageID,
+            "primary: " + previousPrimary + " -> " + currentPrimary + (primaryChanged ? " (changed)" : " (unchanged)"),
+            "addedContexts: " + (addedContextIDs.length > 0 ? addedContextIDs.join(", ") : "none"),
+            "removedContexts: " + (removedContextIDs.length > 0 ? removedContextIDs.join(", ") : "none"),
+          ];
+
+          if (changedContexts.length === 0) {
+            lines.push("score/rank/type changes: none");
+            return lines.join("\n");
+          }
+
+          lines.push("score/rank/type changes:");
+          for (const changed of changedContexts) {
+            const change = asObject(changed);
+            const contextID = typeof change.contextID === "string" ? change.contextID : "unknown";
+            const previousScore = typeof change.previousScore === "number" ? change.previousScore.toFixed(3) : "-";
+            const currentScore = typeof change.currentScore === "number" ? change.currentScore.toFixed(3) : "-";
+            const previousRank = typeof change.previousRank === "number" ? String(change.previousRank) : "-";
+            const currentRank = typeof change.currentRank === "number" ? String(change.currentRank) : "-";
+            const previousBucketType = typeof change.previousBucketType === "string" ? change.previousBucketType : "-";
+            const currentBucketType = typeof change.currentBucketType === "string" ? change.currentBucketType : "-";
+            lines.push(
+              "- " +
+                contextID +
+                " score " +
+                previousScore +
+                " -> " +
+                currentScore +
+                ", rank " +
+                previousRank +
+                " -> " +
+                currentRank +
+                ", type " +
+                previousBucketType +
+                " -> " +
+                currentBucketType,
+            );
+          }
+
+          return lines.join("\n");
+        }
+
+        function formatRequestScaffold(scaffold) {
+          const entries = asArray(scaffold).map((entry) => asObject(entry));
+          if (entries.length === 0) {
+            return "No raw request scaffold recorded for this message.";
+          }
+
+          const before = entries.find((entry) => entry.stage === "before-compaction") || entries[0];
+          const finalEntry = entries.find((entry) => entry.stage === "final-model-input") || entries[entries.length - 1];
+          const formation = asObject(before.formation);
+          const cacheStability = asObject(finalEntry.cacheStability);
+          const historyTail = asArray(before.historyTail);
+
+          const lines = [
+            "stagesRecorded: " + entries.length,
+            "latestUserTextChars: " + (typeof before.latestUserTextChars === "number" ? before.latestUserTextChars : 0),
+            "latestUserTextPreview: " + (typeof before.latestUserTextPreview === "string" ? before.latestUserTextPreview : ""),
+            "historyMessagesRouted: " + (typeof formation.historyMessages === "number" ? formation.historyMessages : historyTail.length),
+            "historyTailMessages: " + historyTail.length,
+            "primaryContextID: " + (typeof formation.primaryContextID === "string" ? formation.primaryContextID : "none"),
+            "secondaryContextIDs: " +
+              (asArray(formation.secondaryContextIDs).map((value) => String(value)).join(", ") || "none"),
+            "partsBeforeCompaction: " + summarizeParts(before.messageParts),
+            "compacted: " + (finalEntry.compacted === true ? "yes" : "no"),
+            "partsFinalModelInput: " + summarizeParts(finalEntry.messageParts),
+            "focusedContextChars: " +
+              (typeof finalEntry.focusedContextChars === "number" ? String(finalEntry.focusedContextChars) : "0"),
+            "cacheStablePrefix: " + (typeof cacheStability.stablePrefix === "string" ? cacheStability.stablePrefix : "none"),
+            "focusedContextApplied: " + (cacheStability.focusedContextApplied === true ? "yes" : "no"),
+          ];
+
+          if (typeof finalEntry.reason === "string" && finalEntry.reason.length > 0) {
+            lines.push("finalReason: " + finalEntry.reason);
+          }
+
+          return lines.join("\n");
+        }
+
         async function loadMessageDebug(sessionID, messageID) {
           const panel = document.getElementById("message-debug-" + sessionID);
           if (!panel) {
@@ -426,7 +546,12 @@ export function renderLaneVisualizationHTML(
               return;
             }
             const payload = await response.json();
-            panel.textContent = JSON.stringify(payload, null, 2);
+            const sections = [
+              "Bucket Changes\n" + formatBucketDelta(payload.bucketDelta),
+              "Request Formation\n" + formatRequestScaffold(payload.rawRequestScaffold),
+              "Raw Message Debug Payload\n" + JSON.stringify(payload, null, 2),
+            ];
+            panel.textContent = sections.join("\n\n");
           } catch (error) {
             panel.textContent = "Failed to load message debug: " + error;
           }

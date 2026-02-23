@@ -2,6 +2,57 @@ import { mkdirSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
+function primaryContextIDFromAssignments(assignments) {
+    const byRank = assignments.find((item) => item.bucketRank === 0);
+    if (byRank) {
+        return byRank.contextID;
+    }
+    const byType = assignments.find((item) => item.bucketType === "primary");
+    return byType?.contextID ?? null;
+}
+function computeIntentBucketDelta(previousMessageID, previousBuckets, currentBuckets) {
+    const previousMap = new Map(previousBuckets.map((item) => [item.contextID, item]));
+    const currentMap = new Map(currentBuckets.map((item) => [item.contextID, item]));
+    const addedContextIDs = [...currentMap.keys()].filter((contextID) => !previousMap.has(contextID)).sort((a, b) => a.localeCompare(b));
+    const removedContextIDs = [...previousMap.keys()].filter((contextID) => !currentMap.has(contextID)).sort((a, b) => a.localeCompare(b));
+    const changedContexts = [];
+    for (const [contextID, current] of currentMap.entries()) {
+        const previous = previousMap.get(contextID);
+        if (!previous) {
+            continue;
+        }
+        if (previous.score !== current.score ||
+            previous.bucketRank !== current.bucketRank ||
+            previous.bucketType !== current.bucketType) {
+            changedContexts.push({
+                contextID,
+                previousScore: previous.score,
+                currentScore: current.score,
+                previousRank: previous.bucketRank,
+                currentRank: current.bucketRank,
+                previousBucketType: previous.bucketType,
+                currentBucketType: current.bucketType,
+            });
+        }
+    }
+    changedContexts.sort((left, right) => {
+        if (left.currentRank !== right.currentRank) {
+            return left.currentRank - right.currentRank;
+        }
+        return left.contextID.localeCompare(right.contextID);
+    });
+    const previousPrimaryContextID = primaryContextIDFromAssignments(previousBuckets);
+    const currentPrimaryContextID = primaryContextIDFromAssignments(currentBuckets);
+    return {
+        previousMessageID,
+        previousPrimaryContextID,
+        currentPrimaryContextID,
+        primaryChanged: previousPrimaryContextID !== currentPrimaryContextID,
+        addedContextIDs,
+        removedContextIDs,
+        changedContexts,
+    };
+}
 const require = createRequire(import.meta.url);
 function resolveDBPath(baseDirectory, dbPath) {
     return isAbsolute(dbPath) ? dbPath : resolve(baseDirectory, dbPath);
@@ -635,6 +686,73 @@ export class ContextLaneStore {
             reason: row.reason,
             createdAt: row.created_at,
         }));
+    }
+    previousIntentBucketMessageID(sessionID, messageID) {
+        const db = this.db;
+        if (!db) {
+            const maxCreatedAtByMessage = new Map();
+            for (const row of this.fallbackIntentBuckets) {
+                if (row.sessionID !== sessionID) {
+                    continue;
+                }
+                const existing = maxCreatedAtByMessage.get(row.messageID) ?? Number.NEGATIVE_INFINITY;
+                maxCreatedAtByMessage.set(row.messageID, Math.max(existing, row.createdAt));
+            }
+            const currentCreatedAt = maxCreatedAtByMessage.get(messageID);
+            if (currentCreatedAt === undefined) {
+                return null;
+            }
+            let previous = null;
+            for (const [candidateMessageID, candidateCreatedAt] of maxCreatedAtByMessage.entries()) {
+                if (candidateMessageID === messageID) {
+                    continue;
+                }
+                const isEarlier = candidateCreatedAt < currentCreatedAt ||
+                    (candidateCreatedAt === currentCreatedAt && candidateMessageID.localeCompare(messageID) < 0);
+                if (!isEarlier) {
+                    continue;
+                }
+                if (!previous) {
+                    previous = { messageID: candidateMessageID, createdAt: candidateCreatedAt };
+                    continue;
+                }
+                if (candidateCreatedAt > previous.createdAt ||
+                    (candidateCreatedAt === previous.createdAt && candidateMessageID.localeCompare(previous.messageID) > 0)) {
+                    previous = { messageID: candidateMessageID, createdAt: candidateCreatedAt };
+                }
+            }
+            return previous?.messageID ?? null;
+        }
+        const currentRow = db
+            .prepare(`SELECT MAX(created_at) AS created_at
+         FROM message_intent_buckets
+         WHERE session_id = ? AND message_id = ?`)
+            .get(sessionID, messageID);
+        const currentCreatedAt = currentRow?.created_at;
+        if (!Number.isFinite(currentCreatedAt)) {
+            return null;
+        }
+        const previousRow = db
+            .prepare(`SELECT message_id, MAX(created_at) AS created_at
+         FROM message_intent_buckets
+         WHERE session_id = ? AND message_id <> ?
+         GROUP BY message_id
+         HAVING MAX(created_at) < ? OR (MAX(created_at) = ? AND message_id < ?)
+         ORDER BY MAX(created_at) DESC, message_id DESC
+         LIMIT 1`)
+            .get(sessionID, messageID, currentCreatedAt, currentCreatedAt, messageID);
+        return typeof previousRow?.message_id === "string" ? previousRow.message_id : null;
+    }
+    listIntentBucketAssignmentsWithDelta(sessionID, messageID, limit) {
+        const normalizedLimit = Math.max(1, Math.floor(limit));
+        const currentBuckets = this.listIntentBucketAssignments(sessionID, messageID, normalizedLimit);
+        const previousMessageID = this.previousIntentBucketMessageID(sessionID, messageID);
+        const previousBuckets = previousMessageID === null ? [] : this.listIntentBucketAssignments(sessionID, previousMessageID, normalizedLimit);
+        return {
+            currentBuckets,
+            previousBuckets,
+            delta: computeIntentBucketDelta(previousMessageID, previousBuckets, currentBuckets),
+        };
     }
     appendProgressionStep(sessionID, messageID, stepType, detailJSON, now) {
         const db = this.db;

@@ -29,8 +29,14 @@ test("ContextLaneStore works with in-memory fallback when node:sqlite is disable
     const now = Date.now()
 
     const created = store.createContext("session-fallback", "Fallback Lane", "Initial fallback summary", now)
+    const secondary = store.createContext(
+      "session-fallback",
+      "Fallback Lane Secondary",
+      "Secondary fallback summary",
+      now + 250,
+    ).id
     store.createContext("session-alt", "Other Lane", "Alternative lane summary", now + 500)
-    assert.equal(store.countActiveContexts("session-fallback"), 1)
+    assert.equal(store.countActiveContexts("session-fallback"), 2)
 
     store.updateContextSummary("session-fallback", created.id, "Updated fallback summary", now + 1_000)
     const loaded = store.getContext("session-fallback", created.id)
@@ -100,6 +106,43 @@ test("ContextLaneStore works with in-memory fallback when node:sqlite is disable
     const intents = store.listIntentBucketAssignments("session-fallback", "msg-1", 10)
     assert.equal(intents.length, 1)
     assert.equal(intents[0]?.contextID, created.id)
+
+    const firstIntentDebug = store.listIntentBucketAssignmentsWithDelta("session-fallback", "msg-1", 10)
+    assert.equal(firstIntentDebug.previousBuckets.length, 0)
+    assert.equal(firstIntentDebug.delta.previousMessageID, null)
+
+    store.saveIntentBucketAssignments(
+      "session-fallback",
+      "msg-2",
+      [
+        {
+          bucketType: "primary",
+          contextID: secondary,
+          score: 0.94,
+          bucketRank: 0,
+          reason: "selected-primary",
+        },
+        {
+          bucketType: "secondary",
+          contextID: created.id,
+          score: 0.9,
+          bucketRank: 1,
+          reason: "selected-secondary",
+        },
+      ],
+      now + 4_200,
+    )
+    const secondIntentDebug = store.listIntentBucketAssignmentsWithDelta("session-fallback", "msg-2", 10)
+    assert.equal(secondIntentDebug.currentBuckets.length, 2)
+    assert.equal(secondIntentDebug.previousBuckets.length, 1)
+    assert.equal(secondIntentDebug.delta.previousMessageID, "msg-1")
+    assert.equal(secondIntentDebug.delta.primaryChanged, true)
+    assert.deepEqual(secondIntentDebug.delta.addedContextIDs, [secondary])
+    assert.deepEqual(secondIntentDebug.delta.removedContextIDs, [])
+    assert.equal(secondIntentDebug.delta.changedContexts.length, 1)
+    assert.equal(secondIntentDebug.delta.changedContexts[0]?.contextID, created.id)
+    assert.equal(secondIntentDebug.delta.changedContexts[0]?.previousRank, 0)
+    assert.equal(secondIntentDebug.delta.changedContexts[0]?.currentRank, 1)
 
     store.appendProgressionStep(
       "session-fallback",
@@ -190,6 +233,13 @@ test("ContextLaneStore persists data when sqlite backend is available", { skip: 
     assert.equal(loaded.summary, "Persisted summary")
     assert.equal(loaded.ownerSessionID, "child-session-sqlite")
 
+    const secondary = reopened.createContext(
+      "session-sqlite",
+      "SQLite Lane Secondary",
+      "Secondary persisted summary",
+      now + 1_500,
+    ).id
+
     const sessions = reopened.listSessions(10)
     assert.equal(sessions[0]?.sessionID, "session-sqlite")
 
@@ -211,6 +261,27 @@ test("ContextLaneStore persists data when sqlite backend is available", { skip: 
         },
       ],
       now + 2_000,
+    )
+    reopened.saveIntentBucketAssignments(
+      "session-sqlite",
+      "msg-sqlite-2",
+      [
+        {
+          bucketType: "primary",
+          contextID: secondary,
+          score: 0.92,
+          bucketRank: 0,
+          reason: "selected-primary",
+        },
+        {
+          bucketType: "secondary",
+          contextID: created.id,
+          score: 0.89,
+          bucketRank: 1,
+          reason: "selected-secondary",
+        },
+      ],
+      now + 2_100,
     )
     reopened.appendProgressionStep(
       "session-sqlite",
@@ -238,6 +309,12 @@ test("ContextLaneStore persists data when sqlite backend is available", { skip: 
     const intents = reopened.listIntentBucketAssignments("session-sqlite", "msg-sqlite", 10)
     assert.equal(intents.length, 1)
     assert.equal(intents[0]?.bucketType, "primary")
+
+    const intentDebug = reopened.listIntentBucketAssignmentsWithDelta("session-sqlite", "msg-sqlite-2", 10)
+    assert.equal(intentDebug.previousBuckets.length, 1)
+    assert.equal(intentDebug.delta.previousMessageID, "msg-sqlite")
+    assert.equal(intentDebug.delta.primaryChanged, true)
+    assert.deepEqual(intentDebug.delta.addedContextIDs, [secondary])
 
     const steps = reopened.listProgressionSteps("session-sqlite", "msg-sqlite", 10)
     assert.equal(steps.length, 1)

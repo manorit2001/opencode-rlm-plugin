@@ -1,5 +1,13 @@
 import { type LaneVisualizationOptions, type LaneVisualizationSnapshot } from "./visualization.js";
 import type { ContextSnapshotRecord, LaneEventRecord, MessageIntentBucketAssignment, MessageProgressionStep } from "./types.js";
+export interface LaneMessageDebugPayload {
+    intentBuckets: MessageIntentBucketAssignment[];
+    progression: MessageProgressionStep[];
+    snapshots: ContextSnapshotRecord[];
+    previousIntentBuckets?: MessageIntentBucketAssignment[];
+    bucketDelta?: unknown;
+    rawRequestScaffold?: unknown;
+}
 interface LaneVisualizationSnapshotDefaults {
     sessionID: string;
     sessionLimit: number;
@@ -14,11 +22,7 @@ export interface StartLaneVisualizationWebServerOptions {
     defaults: LaneVisualizationSnapshotDefaults;
     buildSnapshot: (options: LaneVisualizationOptions) => LaneVisualizationSnapshot;
     listEventsAfter: (sessionID: string, afterSeq: number, limit: number) => LaneEventRecord[];
-    getMessageDebug: (sessionID: string, messageID: string, limit: number) => {
-        intentBuckets: MessageIntentBucketAssignment[];
-        progression: MessageProgressionStep[];
-        snapshots: ContextSnapshotRecord[];
-    };
+    getMessageDebug: (sessionID: string, messageID: string, limit: number) => LaneMessageDebugPayload;
 }
 export interface LaneVisualizationWebServerHandle {
     host: string;

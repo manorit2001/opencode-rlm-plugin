@@ -194,6 +194,54 @@ function historySnapshotPayload(history) {
         text: textFromParts(message.parts ?? []),
     }));
 }
+function historySnapshotTailForScaffold(history, limit = 12) {
+    const normalizedLimit = Math.max(1, Math.floor(limit));
+    const start = Math.max(0, history.length - normalizedLimit);
+    return history.slice(start).map((message) => {
+        const text = textFromParts(message.parts ?? []);
+        return {
+            id: message.id ?? "",
+            role: message.role ?? "unknown",
+            textChars: text.length,
+            textPreview: previewScaffoldText(text, 220),
+        };
+    });
+}
+function previewScaffoldText(value, maxChars) {
+    const compact = value.replace(/\s+/g, " ").trim();
+    if (compact.length <= maxChars) {
+        return compact;
+    }
+    return `${compact.slice(0, maxChars)}...`;
+}
+function partsSnapshotPayload(parts) {
+    const snapshots = [];
+    for (let index = 0; index < parts.length; index += 1) {
+        const part = parts[index];
+        if (!part || typeof part !== "object") {
+            snapshots.push({ index, type: "unknown", textChars: 0, textPreview: "" });
+            continue;
+        }
+        const record = part;
+        const type = typeof record.type === "string" ? record.type : "unknown";
+        const text = typeof record.text === "string" ? record.text : "";
+        snapshots.push({
+            index,
+            type,
+            textChars: text.length,
+            textPreview: previewScaffoldText(text, 280),
+        });
+    }
+    return snapshots;
+}
+function parseDetailJSON(value) {
+    try {
+        return JSON.parse(value);
+    }
+    catch {
+        return { error: "invalid-json", value };
+    }
+}
 function delegationHintForSession(laneOrchestrator, sessionID) {
     const primaryContextID = laneOrchestrator.currentPrimaryContextID(sessionID);
     if (!primaryContextID) {
@@ -398,11 +446,22 @@ const plugin = (async (ctx) => {
                             membershipLimit: options.membershipLimit ?? defaults.membershipLimit,
                         }),
                         listEventsAfter: (sessionID, afterSeq, limit) => laneStore.listLaneEventsAfter(sessionID, afterSeq, limit),
-                        getMessageDebug: (sessionID, messageID, limit) => ({
-                            intentBuckets: laneStore.listIntentBucketAssignments(sessionID, messageID, limit),
-                            progression: laneStore.listProgressionSteps(sessionID, messageID, limit),
-                            snapshots: laneStore.listContextSnapshots(sessionID, messageID, null, limit),
-                        }),
+                        getMessageDebug: (sessionID, messageID, limit) => {
+                            const intentDebug = laneStore.listIntentBucketAssignmentsWithDelta(sessionID, messageID, limit);
+                            const snapshots = laneStore.listContextSnapshots(sessionID, messageID, null, limit);
+                            const rawRequestScaffold = snapshots
+                                .filter((snapshot) => snapshot.snapshotKind === "raw-request-scaffold")
+                                .sort((left, right) => left.snapshotIndex - right.snapshotIndex)
+                                .map((snapshot) => parseDetailJSON(snapshot.payloadJSON));
+                            return {
+                                intentBuckets: intentDebug.currentBuckets,
+                                previousIntentBuckets: intentDebug.previousBuckets,
+                                bucketDelta: intentDebug.delta,
+                                progression: laneStore.listProgressionSteps(sessionID, messageID, limit),
+                                snapshots,
+                                rawRequestScaffold,
+                            };
+                        },
                     });
                     laneVisualizationWebSignature = signature;
                     const apiURL = `${laneVisualizationWeb.url}/api/snapshot`;
@@ -495,6 +554,7 @@ const plugin = (async (ctx) => {
             let historyForTransform = history;
             let ownerRoutes = [];
             let routedPrimaryContextID = null;
+            let routedSecondaryContextIDs = [];
             let laneTokenEstimate = null;
             if (config.laneRoutingEnabled && latestUserText.length > 0) {
                 sessionStats.laneRoutingRuns += 1;
@@ -509,6 +569,7 @@ const plugin = (async (ctx) => {
                 historyForTransform = routed.laneHistory;
                 ownerRoutes = routed.ownerRoutes;
                 routedPrimaryContextID = routed.selection.primaryContextID;
+                routedSecondaryContextIDs = routed.selection.secondaryContextIDs;
                 if (routed.selection.createdNewContext) {
                     sessionStats.laneNewContextCount += 1;
                 }
@@ -579,6 +640,34 @@ const plugin = (async (ctx) => {
                 laneTokenEstimate,
                 history: historySnapshotPayload(historyForTransform),
             }), Date.now());
+            laneStore.saveContextSnapshot(sessionID, messageID, "raw-request-scaffold", 0, stringifyDetail({
+                stage: "before-compaction",
+                latestUserTextChars: latestUserText.length,
+                latestUserTextPreview: previewScaffoldText(latestUserText, 300),
+                messageParts: partsSnapshotPayload(parts),
+                historyTail: historySnapshotTailForScaffold(historyForTransform),
+                formation: {
+                    historyMessages: historyForTransform.length,
+                    baselineTokenEstimate,
+                    laneTokenEstimate,
+                    primaryContextID: routedPrimaryContextID,
+                    secondaryContextIDs: routedSecondaryContextIDs,
+                    ownerRoutes: ownerRoutes.map((route) => ({
+                        ownerSessionID: route.ownerSessionID,
+                        contextID: route.contextID,
+                        isPrimary: route.isPrimary,
+                    })),
+                },
+                cacheStability: {
+                    stablePrefix: FOCUSED_CONTEXT_TAG,
+                    focusedContextApplied: false,
+                },
+            }), Date.now());
+            recordProgress("request.scaffold.updated", {
+                stage: "before-compaction",
+                partCount: parts.length,
+                historyMessages: historyForTransform.length,
+            });
             recordProgress("context.prepared", {
                 historyMessages: historyForTransform.length,
                 primaryContextID: routedPrimaryContextID,
@@ -601,6 +690,23 @@ const plugin = (async (ctx) => {
                 sessionStats.compactionsSkipped += 1;
                 sessionStats.lastFocusedChars = 0;
                 sessionStats.lastDecision = run.pressure < config.pressureThreshold ? "skipped-pressure" : "skipped-no-focused-context";
+                laneStore.saveContextSnapshot(sessionID, messageID, "raw-request-scaffold", 1, stringifyDetail({
+                    stage: "final-model-input",
+                    compacted: false,
+                    reason: sessionStats.lastDecision,
+                    pressure: run.pressure,
+                    tokenEstimate: run.tokenEstimate,
+                    messageParts: partsSnapshotPayload(parts),
+                    cacheStability: {
+                        stablePrefix: FOCUSED_CONTEXT_TAG,
+                        focusedContextApplied: false,
+                    },
+                }), Date.now());
+                recordProgress("request.scaffold.updated", {
+                    stage: "final-model-input",
+                    compacted: false,
+                    reason: sessionStats.lastDecision,
+                });
                 recordProgress("compaction.skipped", {
                     pressure: run.pressure,
                     tokenEstimate: run.tokenEstimate,
@@ -617,6 +723,24 @@ const plugin = (async (ctx) => {
                 pressure: run.pressure,
                 tokenEstimate: run.tokenEstimate,
             }), Date.now());
+            laneStore.saveContextSnapshot(sessionID, messageID, "raw-request-scaffold", 1, stringifyDetail({
+                stage: "final-model-input",
+                compacted: true,
+                pressure: run.pressure,
+                tokenEstimate: run.tokenEstimate,
+                focusedContextChars: run.focusedContext.length,
+                focusedContextPreview: previewScaffoldText(run.focusedContext, 280),
+                messageParts: partsSnapshotPayload(parts),
+                cacheStability: {
+                    stablePrefix: FOCUSED_CONTEXT_TAG,
+                    focusedContextApplied: true,
+                },
+            }), Date.now());
+            recordProgress("request.scaffold.updated", {
+                stage: "final-model-input",
+                compacted: true,
+                focusedContextChars: run.focusedContext.length,
+            });
             recordProgress("compaction.applied", {
                 focusedContextChars: run.focusedContext.length,
                 pressure: run.pressure,

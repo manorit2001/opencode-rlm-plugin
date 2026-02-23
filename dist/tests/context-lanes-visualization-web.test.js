@@ -14,6 +14,7 @@ test("lane visualization web server serves HTML dashboard and snapshot API", asy
     const now = 1_700_000_000_000;
     try {
         store.createContext("session-web", "Web Lane", "Dashboard lane", now, "context-web");
+        store.createContext("session-web", "Web Lane Secondary", "Secondary lane", now + 100, "context-web-2");
         store.saveMemberships("session-web", "msg-web-1", [
             {
                 contextID: "context-web",
@@ -33,11 +34,20 @@ test("lane visualization web server serves HTML dashboard and snapshot API", asy
             },
             buildSnapshot: (options) => buildLaneVisualizationSnapshot(store, orchestrator, options),
             listEventsAfter: (sessionID, afterSeq, limit) => store.listLaneEventsAfter(sessionID, afterSeq, limit),
-            getMessageDebug: (sessionID, messageID, limit) => ({
-                intentBuckets: store.listIntentBucketAssignments(sessionID, messageID, limit),
-                progression: store.listProgressionSteps(sessionID, messageID, limit),
-                snapshots: store.listContextSnapshots(sessionID, messageID, null, limit),
-            }),
+            getMessageDebug: (sessionID, messageID, limit) => {
+                const intentDebug = store.listIntentBucketAssignmentsWithDelta(sessionID, messageID, limit);
+                const snapshots = store.listContextSnapshots(sessionID, messageID, null, limit);
+                return {
+                    intentBuckets: intentDebug.currentBuckets,
+                    previousIntentBuckets: intentDebug.previousBuckets,
+                    bucketDelta: intentDebug.delta,
+                    progression: store.listProgressionSteps(sessionID, messageID, limit),
+                    snapshots,
+                    rawRequestScaffold: snapshots
+                        .filter((snapshot) => snapshot.snapshotKind === "raw-request-scaffold")
+                        .map((snapshot) => JSON.parse(snapshot.payloadJSON)),
+                };
+            },
         });
         try {
             const htmlResponse = await fetch(server.url);
@@ -49,16 +59,52 @@ test("lane visualization web server serves HTML dashboard and snapshot API", asy
             assert.ok(html.includes("Events:"));
             store.appendLaneEvent("session-web", "msg-web-1", "message.received", JSON.stringify({ step: 1 }), now + 2_000);
             store.appendProgressionStep("session-web", "msg-web-1", "message.received", JSON.stringify({ step: 1 }), now + 2_000);
-            store.saveIntentBucketAssignments("session-web", "msg-web-1", [
+            store.saveIntentBucketAssignments("session-web", "msg-web-0", [
                 {
                     bucketType: "primary",
                     contextID: "context-web",
+                    score: 0.9,
+                    bucketRank: 0,
+                    reason: "selected-primary",
+                },
+            ], now + 1_900);
+            store.saveIntentBucketAssignments("session-web", "msg-web-1", [
+                {
+                    bucketType: "primary",
+                    contextID: "context-web-2",
                     score: 0.95,
                     bucketRank: 0,
                     reason: "selected-primary",
                 },
+                {
+                    bucketType: "secondary",
+                    contextID: "context-web",
+                    score: 0.91,
+                    bucketRank: 1,
+                    reason: "selected-secondary",
+                },
             ], now + 2_000);
             store.saveContextSnapshot("session-web", "msg-web-1", "model-input", 0, JSON.stringify({ historyMessages: 1 }), now + 2_000);
+            store.saveContextSnapshot("session-web", "msg-web-1", "raw-request-scaffold", 0, JSON.stringify({
+                stage: "before-compaction",
+                latestUserTextChars: 12,
+                messageParts: [{ index: 0, type: "text", textChars: 12, textPreview: "hello lanes" }],
+                formation: {
+                    historyMessages: 1,
+                    primaryContextID: "context-web-2",
+                    secondaryContextIDs: ["context-web"],
+                },
+            }), now + 2_001);
+            store.saveContextSnapshot("session-web", "msg-web-1", "raw-request-scaffold", 1, JSON.stringify({
+                stage: "final-model-input",
+                compacted: true,
+                focusedContextChars: 36,
+                messageParts: [{ index: 0, type: "text", textChars: 48, textPreview: "focused + hello lanes" }],
+                cacheStability: {
+                    stablePrefix: "<focused_context>",
+                    focusedContextApplied: true,
+                },
+            }), now + 2_002);
             const eventsResponse = await fetch(`${server.url}/api/events?sessionID=session-web&afterSeq=0&limit=10`);
             assert.equal(eventsResponse.status, 200);
             const eventsPayload = (await eventsResponse.json());
@@ -69,8 +115,17 @@ test("lane visualization web server serves HTML dashboard and snapshot API", asy
             assert.equal(messageResponse.status, 200);
             const messagePayload = (await messageResponse.json());
             assert.equal(messagePayload.intentBuckets[0]?.bucketType, "primary");
+            assert.equal(messagePayload.intentBuckets[0]?.contextID, "context-web-2");
+            assert.equal(messagePayload.previousIntentBuckets.length, 1);
+            assert.equal(messagePayload.bucketDelta.previousMessageID, "msg-web-0");
+            assert.equal(messagePayload.bucketDelta.primaryChanged, true);
+            assert.deepEqual(messagePayload.bucketDelta.addedContextIDs, ["context-web-2"]);
+            assert.equal(messagePayload.bucketDelta.changedContexts[0]?.contextID, "context-web");
+            assert.equal(messagePayload.rawRequestScaffold.length, 2);
+            assert.equal(messagePayload.rawRequestScaffold[0]?.stage, "before-compaction");
             assert.equal(messagePayload.progression[0]?.stepType, "message.received");
-            assert.equal(messagePayload.snapshots[0]?.snapshotKind, "model-input");
+            assert.ok(messagePayload.snapshots.some((snapshot) => snapshot.snapshotKind === "model-input"));
+            assert.ok(messagePayload.snapshots.some((snapshot) => snapshot.snapshotKind === "raw-request-scaffold"));
             const apiResponse = await fetch(`${server.url}/api/snapshot`);
             assert.equal(apiResponse.status, 200);
             const snapshot = (await apiResponse.json());
@@ -108,11 +163,20 @@ test("lane visualization web server honors basePath and query overrides", async 
             },
             buildSnapshot: (options) => buildLaneVisualizationSnapshot(store, orchestrator, options),
             listEventsAfter: (sessionID, afterSeq, limit) => store.listLaneEventsAfter(sessionID, afterSeq, limit),
-            getMessageDebug: (sessionID, messageID, limit) => ({
-                intentBuckets: store.listIntentBucketAssignments(sessionID, messageID, limit),
-                progression: store.listProgressionSteps(sessionID, messageID, limit),
-                snapshots: store.listContextSnapshots(sessionID, messageID, null, limit),
-            }),
+            getMessageDebug: (sessionID, messageID, limit) => {
+                const intentDebug = store.listIntentBucketAssignmentsWithDelta(sessionID, messageID, limit);
+                const snapshots = store.listContextSnapshots(sessionID, messageID, null, limit);
+                return {
+                    intentBuckets: intentDebug.currentBuckets,
+                    previousIntentBuckets: intentDebug.previousBuckets,
+                    bucketDelta: intentDebug.delta,
+                    progression: store.listProgressionSteps(sessionID, messageID, limit),
+                    snapshots,
+                    rawRequestScaffold: snapshots
+                        .filter((snapshot) => snapshot.snapshotKind === "raw-request-scaffold")
+                        .map((snapshot) => JSON.parse(snapshot.payloadJSON)),
+                };
+            },
         });
         try {
             const apiResponse = await fetch(`${server.url}/api/snapshot?sessionID=session-b&sessionLimit=1`);
