@@ -28,9 +28,23 @@ interface MembershipRow {
   context_id: string
 }
 
+interface MembershipEventRow {
+  message_id: string
+  context_id: string
+  relevance: number
+  is_primary: number
+  created_at: number
+}
+
+interface SessionActivityRow {
+  session_id: string
+  last_activity_at: number
+}
+
 interface ContextRow {
   id: string
   session_id: string
+  owner_session_id: string | null
   title: string
   summary: string
   status: ContextStatus
@@ -50,6 +64,19 @@ interface SwitchRow {
 
 interface FallbackMembership {
   sessionID: string
+  messageID: string
+  contextID: string
+  relevance: number
+  isPrimary: boolean
+  createdAt: number
+}
+
+export interface SessionActivity {
+  sessionID: string
+  lastActivityAt: number
+}
+
+export interface ContextMembershipEvent {
   messageID: string
   contextID: string
   relevance: number
@@ -83,6 +110,7 @@ function toContextLane(row: ContextRow): ContextLane {
   return {
     id: row.id,
     sessionID: row.session_id,
+    ownerSessionID: row.owner_session_id ?? undefined,
     title: row.title,
     summary: row.summary,
     status: row.status,
@@ -182,6 +210,7 @@ export class ContextLaneStore {
       CREATE TABLE IF NOT EXISTS contexts (
         session_id TEXT NOT NULL,
         id TEXT NOT NULL,
+        owner_session_id TEXT,
         title TEXT NOT NULL,
         summary TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'active',
@@ -228,6 +257,11 @@ export class ContextLaneStore {
         expires_at INTEGER NOT NULL
       );
     `)
+
+    try {
+      db.exec(`ALTER TABLE contexts ADD COLUMN owner_session_id TEXT`)
+    } catch {
+    }
   }
 
   countActiveContexts(sessionID: string): number {
@@ -248,6 +282,60 @@ export class ContextLaneStore {
     return row?.count ?? 0
   }
 
+  listSessions(limit: number): SessionActivity[] {
+    const normalizedLimit = Math.max(1, Math.floor(limit))
+    const db = this.db
+    if (!db) {
+      const bySession = new Map<string, number>()
+
+      for (const context of this.fallbackContexts) {
+        const previous = bySession.get(context.sessionID) ?? 0
+        bySession.set(context.sessionID, Math.max(previous, context.lastActiveAt))
+      }
+
+      for (const membership of this.fallbackMemberships) {
+        const previous = bySession.get(membership.sessionID) ?? 0
+        bySession.set(membership.sessionID, Math.max(previous, membership.createdAt))
+      }
+
+      for (const event of this.fallbackSwitches) {
+        const previous = bySession.get(event.sessionID) ?? 0
+        bySession.set(event.sessionID, Math.max(previous, event.createdAt))
+      }
+
+      return [...bySession.entries()]
+        .map(([sessionID, lastActivityAt]) => ({ sessionID, lastActivityAt }))
+        .sort((left, right) => {
+          if (right.lastActivityAt !== left.lastActivityAt) {
+            return right.lastActivityAt - left.lastActivityAt
+          }
+          return left.sessionID.localeCompare(right.sessionID)
+        })
+        .slice(0, normalizedLimit)
+    }
+
+    const rows = db
+      .prepare(
+        `SELECT session_id, MAX(ts) AS last_activity_at
+         FROM (
+           SELECT session_id, last_active_at AS ts FROM contexts
+           UNION ALL
+           SELECT session_id, created_at AS ts FROM context_memberships
+           UNION ALL
+           SELECT session_id, created_at AS ts FROM context_switch_events
+         )
+         GROUP BY session_id
+         ORDER BY last_activity_at DESC, session_id ASC
+         LIMIT ?`,
+      )
+      .all(normalizedLimit) as unknown as SessionActivityRow[]
+
+    return rows.map((row) => ({
+      sessionID: row.session_id,
+      lastActivityAt: row.last_activity_at,
+    }))
+  }
+
   listActiveContexts(sessionID: string, limit: number): ContextLane[] {
     const db = this.db
     if (!db) {
@@ -260,7 +348,7 @@ export class ContextLaneStore {
 
     const rows = db
       .prepare(
-        `SELECT id, session_id, title, summary, status, msg_count, last_active_at, created_at, updated_at
+        `SELECT id, session_id, owner_session_id, title, summary, status, msg_count, last_active_at, created_at, updated_at
          FROM contexts
          WHERE session_id = ? AND status = 'active'
          ORDER BY last_active_at DESC
@@ -283,7 +371,7 @@ export class ContextLaneStore {
 
     const rows = db
       .prepare(
-        `SELECT id, session_id, title, summary, status, msg_count, last_active_at, created_at, updated_at
+        `SELECT id, session_id, owner_session_id, title, summary, status, msg_count, last_active_at, created_at, updated_at
          FROM contexts
          WHERE session_id = ?
          ORDER BY last_active_at DESC
@@ -303,7 +391,7 @@ export class ContextLaneStore {
 
     const row = db
       .prepare(
-        `SELECT id, session_id, title, summary, status, msg_count, last_active_at, created_at, updated_at
+        `SELECT id, session_id, owner_session_id, title, summary, status, msg_count, last_active_at, created_at, updated_at
          FROM contexts
          WHERE session_id = ? AND id = ?`,
       )
@@ -312,13 +400,23 @@ export class ContextLaneStore {
     return row ? toContextLane(row) : null
   }
 
-  createContext(sessionID: string, title: string, summary: string, now: number): ContextLane {
-    const id = randomUUID()
+  createContext(
+    sessionID: string,
+    title: string,
+    summary: string,
+    now: number,
+    preferredContextID?: string,
+    ownerSessionID?: string,
+  ): ContextLane {
+    const candidateID = typeof preferredContextID === "string" ? preferredContextID.trim() : ""
+    const id = candidateID.length > 0 ? candidateID : randomUUID()
+    const normalizedOwnerSessionID = typeof ownerSessionID === "string" && ownerSessionID.trim().length > 0 ? ownerSessionID.trim() : undefined
     const db = this.db
     if (!db) {
       const lane: ContextLane = {
         id,
         sessionID,
+        ownerSessionID: normalizedOwnerSessionID,
         title,
         summary,
         status: "active",
@@ -333,14 +431,15 @@ export class ContextLaneStore {
 
     db
       .prepare(
-        `INSERT INTO contexts (session_id, id, title, summary, status, msg_count, last_active_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'active', 0, ?, ?, ?)`,
+        `INSERT INTO contexts (session_id, id, owner_session_id, title, summary, status, msg_count, last_active_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)`,
       )
-      .run(sessionID, id, title, summary, now, now, now)
+      .run(sessionID, id, normalizedOwnerSessionID ?? null, title, summary, now, now, now)
 
     return {
       id,
       sessionID,
+      ownerSessionID: normalizedOwnerSessionID,
       title,
       summary,
       status: "active",
@@ -533,6 +632,50 @@ export class ContextLaneStore {
         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(sessionID, messageID, fromContextID, toContextID, confidence, reason, now)
+  }
+
+  listMembershipEvents(sessionID: string, limit: number): ContextMembershipEvent[] {
+    const normalizedLimit = Math.max(1, Math.floor(limit))
+    const db = this.db
+    if (!db) {
+      return this.fallbackMemberships
+        .filter((membership) => membership.sessionID === sessionID)
+        .sort((left, right) => {
+          if (right.createdAt !== left.createdAt) {
+            return right.createdAt - left.createdAt
+          }
+          if (right.messageID !== left.messageID) {
+            return right.messageID.localeCompare(left.messageID)
+          }
+          return right.contextID.localeCompare(left.contextID)
+        })
+        .slice(0, normalizedLimit)
+        .map((membership) => ({
+          messageID: membership.messageID,
+          contextID: membership.contextID,
+          relevance: membership.relevance,
+          isPrimary: membership.isPrimary,
+          createdAt: membership.createdAt,
+        }))
+    }
+
+    const rows = db
+      .prepare(
+        `SELECT message_id, context_id, relevance, is_primary, created_at
+         FROM context_memberships
+         WHERE session_id = ?
+         ORDER BY created_at DESC, message_id DESC, context_id DESC
+         LIMIT ?`,
+      )
+      .all(sessionID, normalizedLimit) as unknown as MembershipEventRow[]
+
+    return rows.map((row) => ({
+      messageID: row.message_id,
+      contextID: row.context_id,
+      relevance: row.relevance,
+      isPrimary: row.is_primary === 1,
+      createdAt: row.created_at,
+    }))
   }
 
   listSwitchEvents(sessionID: string, limit: number): ContextSwitchEvent[] {

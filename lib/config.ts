@@ -25,6 +25,14 @@ export const DEFAULT_CONFIG: RecursiveConfig = {
   laneSemanticAmbiguityTopScore: 0.62,
   laneSemanticAmbiguityGap: 0.08,
   laneMinHistoryTokenRatio: 0.75,
+  laneVisualizationSessionLimit: 8,
+  laneVisualizationContextLimit: 16,
+  laneVisualizationSwitchLimit: 60,
+  laneVisualizationMembershipLimit: 240,
+  laneVisualizationOutputPath: ".opencode/rlm-context-lanes-visualization.html",
+  laneVisualizationWebHost: "127.0.0.1",
+  laneVisualizationWebPort: 3799,
+  laneVisualizationWebBasePath: "/",
   laneDbPath: ".opencode/rlm-context-lanes.sqlite",
   laneBucketsUseSessions: false,
   laneSessionTitlePrefix: "Project",
@@ -207,6 +215,63 @@ export function getConfig(): RecursiveConfig {
     0,
     1,
   )
+  const laneVisualizationSessionLimit = Math.max(
+    1,
+    Math.floor(
+      readNumber(
+        "RLM_PLUGIN_LANES_VIS_SESSION_LIMIT",
+        DEFAULT_CONFIG.laneVisualizationSessionLimit ?? 8,
+      ),
+    ),
+  )
+  const laneVisualizationContextLimit = Math.max(
+    1,
+    Math.floor(
+      readNumber(
+        "RLM_PLUGIN_LANES_VIS_CONTEXT_LIMIT",
+        DEFAULT_CONFIG.laneVisualizationContextLimit ?? 16,
+      ),
+    ),
+  )
+  const laneVisualizationSwitchLimit = Math.max(
+    1,
+    Math.floor(
+      readNumber(
+        "RLM_PLUGIN_LANES_VIS_SWITCH_LIMIT",
+        DEFAULT_CONFIG.laneVisualizationSwitchLimit ?? 60,
+      ),
+    ),
+  )
+  const laneVisualizationMembershipLimit = Math.max(
+    1,
+    Math.floor(
+      readNumber(
+        "RLM_PLUGIN_LANES_VIS_MEMBERSHIP_LIMIT",
+        DEFAULT_CONFIG.laneVisualizationMembershipLimit ?? 240,
+      ),
+    ),
+  )
+  const laneVisualizationOutputPath = readString(
+    "RLM_PLUGIN_LANES_VIS_OUTPUT_PATH",
+    DEFAULT_CONFIG.laneVisualizationOutputPath ?? ".opencode/rlm-context-lanes-visualization.html",
+  )
+  const laneVisualizationWebHost = readString(
+    "RLM_PLUGIN_LANES_VIS_WEB_HOST",
+    DEFAULT_CONFIG.laneVisualizationWebHost ?? "127.0.0.1",
+  )
+  const laneVisualizationWebPort = Math.max(
+    1,
+    Math.floor(
+      readNumber(
+        "RLM_PLUGIN_LANES_VIS_WEB_PORT",
+        DEFAULT_CONFIG.laneVisualizationWebPort ?? 3799,
+      ),
+    ),
+  )
+  const laneVisualizationWebBasePath = readString(
+    "RLM_PLUGIN_LANES_VIS_WEB_BASE_PATH",
+    DEFAULT_CONFIG.laneVisualizationWebBasePath ?? "/",
+  )
   const laneDbPath = readString("RLM_PLUGIN_LANES_DB_PATH", DEFAULT_CONFIG.laneDbPath)
   const laneBucketsUseSessions = readBoolean(
     "RLM_PLUGIN_LANES_SESSION_BUCKETS_ENABLED",
@@ -277,6 +342,14 @@ export function getConfig(): RecursiveConfig {
     laneSemanticAmbiguityTopScore,
     laneSemanticAmbiguityGap,
     laneMinHistoryTokenRatio,
+    laneVisualizationSessionLimit,
+    laneVisualizationContextLimit,
+    laneVisualizationSwitchLimit,
+    laneVisualizationMembershipLimit,
+    laneVisualizationOutputPath,
+    laneVisualizationWebHost,
+    laneVisualizationWebPort,
+    laneVisualizationWebBasePath,
     laneDbPath,
     laneBucketsUseSessions,
     laneSessionTitlePrefix,

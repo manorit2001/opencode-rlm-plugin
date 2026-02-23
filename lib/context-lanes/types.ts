@@ -5,6 +5,7 @@ export type ContextStatus = "active" | "archived"
 export interface ContextLane {
   id: string
   sessionID: string
+  ownerSessionID?: string
   title: string
   summary: string
   status: ContextStatus
@@ -46,6 +47,14 @@ export interface ContextRoutingResult {
   selection: ContextLaneSelection
   laneHistory: ChatMessage[]
   activeContextCount: number
+  ownerRoutes: ContextOwnerRoute[]
+}
+
+export interface ContextOwnerRoute {
+  ownerSessionID: string
+  contextID: string
+  contextTitle: string
+  isPrimary: boolean
 }
 
 export interface ContextSwitchEvent {

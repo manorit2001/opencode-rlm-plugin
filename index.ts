@@ -17,6 +17,11 @@ import {
   recordLaneTelemetry,
   type SessionRuntimeStats,
 } from "./lib/runtime-stats.js"
+import { buildLaneVisualizationSnapshot } from "./lib/context-lanes/visualization.js"
+import {
+  startLaneVisualizationWebServer,
+  type LaneVisualizationWebServerHandle,
+} from "./lib/context-lanes/visualization-web.js"
 
 const FOCUSED_CONTEXT_TAG = "[RLM_FOCUSED_CONTEXT]"
 const INTERNAL_CONTEXT_HANDOFF_TAG = "[RLM_INTERNAL_CONTEXT_HANDOFF]"
@@ -276,6 +281,8 @@ const plugin: Plugin = (async (ctx) => {
       : undefined,
   )
   const statsBySession = new Map<string, SessionRuntimeStats>()
+  let laneVisualizationWeb: LaneVisualizationWebServerHandle | null = null
+  let laneVisualizationWebSignature = ""
 
   const notifyOwnerSessions = async (
     rootSessionID: string,
@@ -393,6 +400,93 @@ const plugin: Plugin = (async (ctx) => {
             activeContextCount: laneOrchestrator.activeContextCount(tctx.sessionID),
             switchEvents,
           })
+        },
+      }),
+      "contexts-visualize": tool({
+        description: "Start a web frontend that visualizes lane formation from lane sqlite data",
+        args: {
+          sessionID: tool.schema.string().min(1).optional(),
+          host: tool.schema.string().optional(),
+          port: tool.schema.number().int().positive().optional(),
+          basePath: tool.schema.string().optional(),
+          sessionLimit: tool.schema.number().int().positive().optional(),
+          contextLimit: tool.schema.number().int().positive().optional(),
+          switchLimit: tool.schema.number().int().positive().optional(),
+          membershipLimit: tool.schema.number().int().positive().optional(),
+        },
+        execute: async (args, tctx) => {
+          const defaults = {
+            sessionID: (args.sessionID ?? tctx.sessionID).trim(),
+            sessionLimit: args.sessionLimit ?? config.laneVisualizationSessionLimit ?? 8,
+            contextLimit: args.contextLimit ?? config.laneVisualizationContextLimit ?? 16,
+            switchLimit: args.switchLimit ?? config.laneVisualizationSwitchLimit ?? 60,
+            membershipLimit: args.membershipLimit ?? config.laneVisualizationMembershipLimit ?? 240,
+          }
+
+          const host = (args.host ?? config.laneVisualizationWebHost ?? "127.0.0.1").trim() || "127.0.0.1"
+          const port = args.port ?? config.laneVisualizationWebPort ?? 3799
+          const basePath = (args.basePath ?? config.laneVisualizationWebBasePath ?? "/").trim() || "/"
+
+          const signature = JSON.stringify({ host, port, basePath, defaults })
+          if (laneVisualizationWeb && laneVisualizationWebSignature === signature) {
+            const apiURL = `${laneVisualizationWeb.url}/api/snapshot`
+            const healthURL = `${laneVisualizationWeb.url}/health`
+            return [
+              `Lane visualization web frontend already running at ${laneVisualizationWeb.url}`,
+              `Snapshot API: ${apiURL}`,
+              `Health check: ${healthURL}`,
+              `Default session: ${defaults.sessionID || "none"}`,
+              "Query params: sessionID, sessionLimit, contextLimit, switchLimit, membershipLimit",
+            ].join("\n")
+          }
+
+          if (laneVisualizationWeb) {
+            await laneVisualizationWeb.close()
+            laneVisualizationWeb = null
+            laneVisualizationWebSignature = ""
+          }
+
+          laneVisualizationWeb = await startLaneVisualizationWebServer({
+            host,
+            port,
+            basePath,
+            defaults,
+            buildSnapshot: (options) =>
+              buildLaneVisualizationSnapshot(laneStore, laneOrchestrator, {
+                sessionID: options.sessionID ?? defaults.sessionID,
+                sessionLimit: options.sessionLimit ?? defaults.sessionLimit,
+                contextLimit: options.contextLimit ?? defaults.contextLimit,
+                switchLimit: options.switchLimit ?? defaults.switchLimit,
+                membershipLimit: options.membershipLimit ?? defaults.membershipLimit,
+              }),
+          })
+          laneVisualizationWebSignature = signature
+
+          const apiURL = `${laneVisualizationWeb.url}/api/snapshot`
+          const healthURL = `${laneVisualizationWeb.url}/health`
+
+          return [
+            `Lane visualization web frontend started at ${laneVisualizationWeb.url}`,
+            `Snapshot API: ${apiURL}`,
+            `Health check: ${healthURL}`,
+            `Default session: ${defaults.sessionID || "none"}`,
+            "Query params: sessionID, sessionLimit, contextLimit, switchLimit, membershipLimit",
+          ].join("\n")
+        },
+      }),
+      "contexts-visualize-stop": tool({
+        description: "Stop the lane visualization web frontend server",
+        args: {},
+        execute: async () => {
+          if (!laneVisualizationWeb) {
+            return "Lane visualization web frontend is not running."
+          }
+
+          const url = laneVisualizationWeb.url
+          await laneVisualizationWeb.close()
+          laneVisualizationWeb = null
+          laneVisualizationWebSignature = ""
+          return `Lane visualization web frontend stopped: ${url}`
         },
       }),
     },

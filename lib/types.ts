@@ -51,6 +51,14 @@ export interface RecursiveConfig {
   laneSemanticAmbiguityTopScore: number
   laneSemanticAmbiguityGap: number
   laneMinHistoryTokenRatio?: number
+  laneVisualizationSessionLimit?: number
+  laneVisualizationContextLimit?: number
+  laneVisualizationSwitchLimit?: number
+  laneVisualizationMembershipLimit?: number
+  laneVisualizationOutputPath?: string
+  laneVisualizationWebHost?: string
+  laneVisualizationWebPort?: number
+  laneVisualizationWebBasePath?: string
   laneDbPath: string
   laneBucketsUseSessions?: boolean
   laneSessionTitlePrefix?: string

@@ -29,6 +29,7 @@ test("ContextLaneStore works with in-memory fallback when node:sqlite is disable
     const now = Date.now()
 
     const created = store.createContext("session-fallback", "Fallback Lane", "Initial fallback summary", now)
+    store.createContext("session-alt", "Other Lane", "Alternative lane summary", now + 500)
     assert.equal(store.countActiveContexts("session-fallback"), 1)
 
     store.updateContextSummary("session-fallback", created.id, "Updated fallback summary", now + 1_000)
@@ -54,6 +55,12 @@ test("ContextLaneStore works with in-memory fallback when node:sqlite is disable
     const membershipMap = store.getMembershipContextMap("session-fallback", ["msg-1"])
     assert.equal(membershipMap.get("msg-1")?.has(created.id), true)
 
+    const membershipEvents = store.listMembershipEvents("session-fallback", 10)
+    assert.equal(membershipEvents.length, 1)
+    assert.equal(membershipEvents[0]?.messageID, "msg-1")
+    assert.equal(membershipEvents[0]?.contextID, created.id)
+    assert.equal(membershipEvents[0]?.isPrimary, true)
+
     store.recordSwitch(
       "session-fallback",
       "msg-1",
@@ -66,6 +73,11 @@ test("ContextLaneStore works with in-memory fallback when node:sqlite is disable
     const switches = store.listSwitchEvents("session-fallback", 10)
     assert.equal(switches.length, 1)
     assert.equal(switches[0]?.toContextID, created.id)
+
+    const sessions = store.listSessions(10)
+    assert.equal(sessions.length, 2)
+    assert.equal(sessions[0]?.sessionID, "session-fallback")
+    assert.equal(sessions[1]?.sessionID, "session-alt")
 
     store.setManualOverride("session-fallback", created.id, now + 10_000)
     assert.equal(store.getManualOverride("session-fallback", now + 5_000), created.id)
@@ -96,7 +108,26 @@ test("ContextLaneStore persists data when sqlite backend is available", { skip: 
   try {
     const store = new ContextLaneStore(dir, "lane-state.sqlite")
     const now = Date.now()
-    const created = store.createContext("session-sqlite", "SQLite Lane", "Persisted summary", now)
+    const created = store.createContext(
+      "session-sqlite",
+      "SQLite Lane",
+      "Persisted summary",
+      now,
+      "child-session-sqlite",
+      "child-session-sqlite",
+    )
+    store.saveMemberships(
+      "session-sqlite",
+      "msg-sqlite",
+      [
+        {
+          contextID: created.id,
+          relevance: 0.88,
+          isPrimary: true,
+        },
+      ],
+      now + 1_000,
+    )
     assert.equal(store.countActiveContexts("session-sqlite"), 1)
 
     const reopened = new ContextLaneStore(dir, "lane-state.sqlite")
@@ -105,6 +136,15 @@ test("ContextLaneStore persists data when sqlite backend is available", { skip: 
     const loaded = reopened.getContext("session-sqlite", created.id)
     assert.ok(loaded)
     assert.equal(loaded.summary, "Persisted summary")
+    assert.equal(loaded.ownerSessionID, "child-session-sqlite")
+
+    const sessions = reopened.listSessions(10)
+    assert.equal(sessions[0]?.sessionID, "session-sqlite")
+
+    const membershipEvents = reopened.listMembershipEvents("session-sqlite", 10)
+    assert.equal(membershipEvents.length, 1)
+    assert.equal(membershipEvents[0]?.messageID, "msg-sqlite")
+    assert.equal(membershipEvents[0]?.contextID, created.id)
   } finally {
     rmSync(dir, { recursive: true, force: true })
 
