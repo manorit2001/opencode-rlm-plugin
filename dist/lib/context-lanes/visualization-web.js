@@ -31,6 +31,119 @@ function parseNonNegativeInt(raw, fallback) {
     }
     return Math.max(0, Math.floor(parsed));
 }
+function asRecord(value) {
+    if (value && typeof value === "object") {
+        return value;
+    }
+    return {};
+}
+function asArray(value) {
+    return Array.isArray(value) ? value : [];
+}
+function asNumber(value, fallback = 0) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+        return value;
+    }
+    return fallback;
+}
+function normalizeRiskScore(score) {
+    return Math.max(0, Math.min(100, Math.round(score)));
+}
+function riskLevel(score) {
+    if (score >= 67) {
+        return "high";
+    }
+    if (score >= 34) {
+        return "medium";
+    }
+    return "low";
+}
+function computeCacheRisk(payload) {
+    const delta = asRecord(payload.bucketDelta);
+    const scaffolds = asArray(payload.rawRequestScaffold).map((entry) => asRecord(entry));
+    const beforeScaffold = scaffolds.find((entry) => entry.stage === "before-compaction") ?? scaffolds[0] ?? {};
+    const finalScaffold = scaffolds.find((entry) => entry.stage === "final-model-input") ??
+        scaffolds[Math.max(0, scaffolds.length - 1)] ??
+        {};
+    const formation = asRecord(beforeScaffold.formation);
+    const cacheStability = asRecord(finalScaffold.cacheStability);
+    const primaryChanged = delta.primaryChanged === true;
+    const addedContextCount = asArray(delta.addedContextIDs).length;
+    const removedContextCount = asArray(delta.removedContextIDs).length;
+    const changedContextCount = asArray(delta.changedContexts).length;
+    const latestUserTextChars = asNumber(beforeScaffold.latestUserTextChars, 0);
+    const historyMessages = asNumber(formation.historyMessages, asArray(beforeScaffold.historyTail).length);
+    const focusedContextApplied = cacheStability.focusedContextApplied === true || finalScaffold.compacted === true;
+    const stablePrefixPresent = typeof cacheStability.stablePrefix === "string" && cacheStability.stablePrefix.length > 0;
+    const reasons = [];
+    let score = 0;
+    if (primaryChanged) {
+        score += 28;
+        reasons.push("primary-context-switch");
+    }
+    const membershipDeltaCount = addedContextCount + removedContextCount;
+    if (membershipDeltaCount > 0) {
+        score += Math.min(18, membershipDeltaCount * 6);
+        reasons.push("bucket-membership-delta");
+    }
+    if (changedContextCount > 0) {
+        score += Math.min(24, changedContextCount * 8);
+        reasons.push("bucket-score-rank-delta");
+    }
+    if (focusedContextApplied) {
+        score += 14;
+        reasons.push("focused-context-prepend");
+    }
+    if (latestUserTextChars > 1_200) {
+        score += 12;
+        reasons.push("large-latest-user-message");
+    }
+    else if (latestUserTextChars > 500) {
+        score += 6;
+        reasons.push("medium-latest-user-message");
+    }
+    if (historyMessages > 30) {
+        score += 8;
+        reasons.push("large-routed-history");
+    }
+    else if (historyMessages > 15) {
+        score += 4;
+        reasons.push("medium-routed-history");
+    }
+    if (stablePrefixPresent) {
+        score -= 10;
+        reasons.push("stable-prefix-anchor");
+    }
+    else {
+        score += 6;
+        reasons.push("missing-stable-prefix");
+    }
+    if (scaffolds.length === 0) {
+        score += 8;
+        reasons.push("missing-request-scaffold");
+    }
+    if (payload.bucketDelta === undefined) {
+        score += 6;
+        reasons.push("missing-bucket-delta");
+    }
+    const normalized = normalizeRiskScore(score);
+    return {
+        score: normalized,
+        level: riskLevel(normalized),
+        reasons: [...new Set(reasons)],
+        inputs: {
+            primaryChanged,
+            addedContextCount,
+            removedContextCount,
+            changedContextCount,
+            latestUserTextChars,
+            historyMessages,
+            focusedContextApplied,
+            stablePrefixPresent,
+            scaffoldStages: scaffolds.length,
+        },
+    };
+}
 function optionsFromQuery(url, defaults) {
     const sessionID = (url.searchParams.get("sessionID") ?? defaults.sessionID).trim();
     return {
@@ -113,10 +226,12 @@ function routeRequest(req, res, defaults, buildSnapshot, listEventsAfter, getMes
         }
         const limit = parsePositiveInt(requestURL.searchParams.get("limit"), 120);
         const data = getMessageDebug(sessionID, messageID, limit);
+        const cacheRisk = data.cacheRisk ?? computeCacheRisk(data);
         writeJSON(res, 200, {
             sessionID,
             messageID,
             ...data,
+            cacheRisk,
         });
         return;
     }

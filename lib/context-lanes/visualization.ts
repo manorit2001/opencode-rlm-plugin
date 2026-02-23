@@ -527,6 +527,36 @@ export function renderLaneVisualizationHTML(
           return lines.join("\n");
         }
 
+        function formatCacheRisk(cacheRisk) {
+          const record = asObject(cacheRisk);
+          if (Object.keys(record).length === 0) {
+            return "Cache risk was not calculated for this message.";
+          }
+
+          const level = typeof record.level === "string" ? record.level : "unknown";
+          const score = typeof record.score === "number" ? String(record.score) : "0";
+          const reasons = asArray(record.reasons).map((value) => String(value));
+          const inputs = asObject(record.inputs);
+
+          const lines = [
+            "score: " + score + " / 100",
+            "level: " + level,
+            "reasons: " + (reasons.length > 0 ? reasons.join(", ") : "none"),
+            "inputs:",
+            "- primaryChanged: " + (inputs.primaryChanged === true ? "yes" : "no"),
+            "- addedContextCount: " + (typeof inputs.addedContextCount === "number" ? String(inputs.addedContextCount) : "0"),
+            "- removedContextCount: " + (typeof inputs.removedContextCount === "number" ? String(inputs.removedContextCount) : "0"),
+            "- changedContextCount: " + (typeof inputs.changedContextCount === "number" ? String(inputs.changedContextCount) : "0"),
+            "- focusedContextApplied: " + (inputs.focusedContextApplied === true ? "yes" : "no"),
+            "- latestUserTextChars: " + (typeof inputs.latestUserTextChars === "number" ? String(inputs.latestUserTextChars) : "0"),
+            "- historyMessages: " + (typeof inputs.historyMessages === "number" ? String(inputs.historyMessages) : "0"),
+            "- stablePrefixPresent: " + (inputs.stablePrefixPresent === true ? "yes" : "no"),
+            "- scaffoldStages: " + (typeof inputs.scaffoldStages === "number" ? String(inputs.scaffoldStages) : "0"),
+          ];
+
+          return lines.join("\n");
+        }
+
         async function loadMessageDebug(sessionID, messageID) {
           const panel = document.getElementById("message-debug-" + sessionID);
           if (!panel) {
@@ -547,6 +577,7 @@ export function renderLaneVisualizationHTML(
             }
             const payload = await response.json();
             const sections = [
+              "Prompt Cache Risk\n" + formatCacheRisk(payload.cacheRisk),
               "Bucket Changes\n" + formatBucketDelta(payload.bucketDelta),
               "Request Formation\n" + formatRequestScaffold(payload.rawRequestScaffold),
               "Raw Message Debug Payload\n" + JSON.stringify(payload, null, 2),

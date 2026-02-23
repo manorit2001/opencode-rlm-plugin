@@ -66,6 +66,7 @@ test("lane visualization web server serves HTML dashboard and snapshot API", asy
       assert.ok(html.includes("session-selector"))
       assert.ok(html.includes("API:"))
       assert.ok(html.includes("Events:"))
+      assert.ok(html.includes("Prompt Cache Risk"))
 
       store.appendLaneEvent("session-web", "msg-web-1", "message.received", JSON.stringify({ step: 1 }), now + 2_000)
       store.appendProgressionStep(
@@ -175,6 +176,15 @@ test("lane visualization web server serves HTML dashboard and snapshot API", asy
           changedContexts: Array<{ contextID: string }>
         }
         rawRequestScaffold: Array<{ stage: string }>
+        cacheRisk: {
+          score: number
+          level: "low" | "medium" | "high"
+          reasons: string[]
+          inputs: {
+            stablePrefixPresent: boolean
+            focusedContextApplied: boolean
+          }
+        }
         progression: Array<{ stepType: string }>
         snapshots: Array<{ snapshotKind: string }>
       }
@@ -187,6 +197,11 @@ test("lane visualization web server serves HTML dashboard and snapshot API", asy
       assert.equal(messagePayload.bucketDelta.changedContexts[0]?.contextID, "context-web")
       assert.equal(messagePayload.rawRequestScaffold.length, 2)
       assert.equal(messagePayload.rawRequestScaffold[0]?.stage, "before-compaction")
+      assert.ok(messagePayload.cacheRisk.score >= 0 && messagePayload.cacheRisk.score <= 100)
+      assert.equal(messagePayload.cacheRisk.level, "medium")
+      assert.equal(messagePayload.cacheRisk.inputs.stablePrefixPresent, true)
+      assert.equal(messagePayload.cacheRisk.inputs.focusedContextApplied, true)
+      assert.ok(messagePayload.cacheRisk.reasons.includes("primary-context-switch"))
       assert.equal(messagePayload.progression[0]?.stepType, "message.received")
       assert.ok(messagePayload.snapshots.some((snapshot) => snapshot.snapshotKind === "model-input"))
       assert.ok(messagePayload.snapshots.some((snapshot) => snapshot.snapshotKind === "raw-request-scaffold"))
