@@ -50,7 +50,10 @@ export interface RecursiveConfig {
   laneSemanticWeight: number
   laneSemanticAmbiguityTopScore: number
   laneSemanticAmbiguityGap: number
+  laneMinHistoryTokenRatio?: number
   laneDbPath: string
+  laneBucketsUseSessions?: boolean
+  laneSessionTitlePrefix?: string
   keepRecentMessages: number
   maxArchiveChars: number
   maxFocusedContextChars: number

@@ -1,4 +1,5 @@
 import type { ChatMessage } from "../types.js"
+import { estimateConversationTokens } from "../token-estimator.js"
 import {
   mergeSemanticScores,
   scoreContextsForMessage,
@@ -9,10 +10,27 @@ import { computeSemanticSimilaritiesForTopCandidates } from "./semantic.js"
 import { ContextLaneStore } from "./store.js"
 import type {
   ContextLane,
+  ContextOwnerRoute,
   ContextRoutingInput,
   ContextRoutingResult,
   MessageContextMembership,
 } from "./types.js"
+
+export interface CreateContextLaneSessionInput {
+  rootSessionID: string
+  laneTitle: string
+  latestUserText: string
+  now: number
+}
+
+export interface CreateContextLaneSessionResult {
+  contextID?: string
+  laneTitle?: string
+}
+
+type CreateContextLaneSessionHook = (
+  input: CreateContextLaneSessionInput,
+) => Promise<CreateContextLaneSessionResult | null>
 
 function cleanLine(input: string): string {
   return input.replace(/\s+/g, " ").trim()
@@ -112,14 +130,93 @@ function dedupeMessages(messages: ChatMessage[]): ChatMessage[] {
   return deduped
 }
 
+function clampRatio(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+
+  return Math.min(1, Math.max(0, value))
+}
+
+function applyTokenRetentionFloor(
+  laneHistory: ChatMessage[],
+  fullHistory: ChatMessage[],
+  minimumTokenRatio: number,
+): ChatMessage[] {
+  const targetRatio = clampRatio(minimumTokenRatio)
+  if (targetRatio <= 0 || laneHistory.length === 0 || fullHistory.length === 0) {
+    return laneHistory
+  }
+
+  const fullTokens = estimateConversationTokens(fullHistory)
+  if (fullTokens <= 0) {
+    return laneHistory
+  }
+
+  const targetTokens = Math.ceil(fullTokens * targetRatio)
+  let laneTokens = estimateConversationTokens(laneHistory)
+  if (laneTokens >= targetTokens) {
+    return laneHistory
+  }
+
+  const includedIDs = new Set(laneHistory.map((message) => message.id).filter((id): id is string => Boolean(id)))
+  const includedObjects = new Set(laneHistory.filter((message) => !message.id))
+
+  for (let index = fullHistory.length - 1; index >= 0 && laneTokens < targetTokens; index -= 1) {
+    const message = fullHistory[index]
+    if (message.id) {
+      if (includedIDs.has(message.id)) {
+        continue
+      }
+      includedIDs.add(message.id)
+    } else {
+      if (includedObjects.has(message)) {
+        continue
+      }
+      includedObjects.add(message)
+    }
+
+    laneTokens += estimateConversationTokens([message])
+  }
+
+  return fullHistory.filter((message) => {
+    if (message.id) {
+      return includedIDs.has(message.id)
+    }
+    return includedObjects.has(message)
+  })
+}
+
 function contextForID(contexts: ContextLane[], contextID: string): ContextLane | undefined {
   return contexts.find((context) => context.id === contextID)
+}
+
+function buildOwnerRoutes(contexts: ContextLane[], primaryContextID: string, secondaryContextIDs: string[]): ContextOwnerRoute[] {
+  const selected = [primaryContextID, ...secondaryContextIDs]
+  const routes: ContextOwnerRoute[] = []
+
+  for (const contextID of selected) {
+    const context = contextForID(contexts, contextID)
+    if (!context?.ownerSessionID) {
+      continue
+    }
+
+    routes.push({
+      ownerSessionID: context.ownerSessionID,
+      contextID,
+      contextTitle: context.title,
+      isPrimary: contextID === primaryContextID,
+    })
+  }
+
+  return routes
 }
 
 export class ContextLaneOrchestrator {
   constructor(
     private readonly store: ContextLaneStore,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly createContextLaneSession?: CreateContextLaneSessionHook,
   ) {}
 
   currentPrimaryContextID(sessionID: string): string | null {
@@ -167,11 +264,42 @@ export class ContextLaneOrchestrator {
     }
 
     if (!primaryContextID) {
+      let laneTitle = titleFromMessage(latestUserText)
+      let preferredContextID: string | undefined
+      let ownerSessionID: string | undefined
+
+      if (this.createContextLaneSession) {
+        try {
+          const createdSession = await this.createContextLaneSession({
+            rootSessionID: sessionID,
+            laneTitle,
+            latestUserText,
+            now,
+          })
+          const candidateID = createdSession?.contextID?.trim()
+          if (candidateID) {
+            preferredContextID = candidateID
+            ownerSessionID = candidateID
+          }
+
+          const candidateTitle = createdSession?.laneTitle?.trim()
+          if (candidateTitle) {
+            laneTitle = candidateTitle
+          }
+        } catch (error) {
+          if (process.env.RLM_PLUGIN_DEBUG === "1") {
+            console.error("RLM lane routing failed to create session-backed lane", error)
+          }
+        }
+      }
+
       const created = this.store.createContext(
         sessionID,
-        titleFromMessage(latestUserText),
+        laneTitle,
         summarizeContext("", latestUserText, config.laneSummaryMaxChars),
         now,
+        preferredContextID,
+        ownerSessionID,
       )
       mutableContexts.push(created)
       primaryContextID = created.id
@@ -235,9 +363,16 @@ export class ContextLaneOrchestrator {
     }
 
     const dedupedLaneHistory = dedupeMessages(laneHistory)
+    const fullDedupedHistory = dedupeMessages(history)
     const minimumMessages = Math.max(config.keepRecentMessages + 2, 4)
     const effectiveHistory =
-      dedupedLaneHistory.length >= minimumMessages ? dedupedLaneHistory : dedupeMessages(history)
+      dedupedLaneHistory.length >= minimumMessages
+        ? applyTokenRetentionFloor(
+            dedupedLaneHistory,
+            fullDedupedHistory,
+            config.laneMinHistoryTokenRatio ?? 0.75,
+          )
+        : fullDedupedHistory
 
     return {
       selection: {
@@ -248,6 +383,7 @@ export class ContextLaneOrchestrator {
       },
       laneHistory: effectiveHistory,
       activeContextCount: this.store.countActiveContexts(sessionID),
+      ownerRoutes: buildOwnerRoutes(mutableContexts, primaryContextID, secondaryContextIDs),
     }
   }
 

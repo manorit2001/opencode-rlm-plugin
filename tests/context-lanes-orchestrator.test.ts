@@ -656,3 +656,42 @@ test("orchestrator keeps loop-like routing in one lane and bounded by full-histo
     }
   })
 })
+
+test("orchestrator smooths lane-history token drops with retention floor", async () => {
+  await withStore(async (_store, orchestrator) => {
+    const history: ChatMessage[] = []
+    const ratios: number[] = []
+    const cfg: RecursiveConfig = {
+      ...BASE_CONFIG,
+      keepRecentMessages: 8,
+      laneMinHistoryTokenRatio: 0.75,
+    }
+
+    const topics = [
+      "backend migration service api schema transaction retry",
+      "frontend ui component css animation responsive layout",
+    ]
+
+    for (let index = 1; index <= 24; index += 1) {
+      const topic = topics[index % 2]
+      const messageID = `drop-${index}`
+      history.push(textMessage(messageID, "user", `${topic} turn ${index} ${"x ".repeat(80)}`))
+
+      const routed = await orchestrator.route({
+        sessionID: "session-drop",
+        messageID,
+        latestUserText: topic,
+        history,
+        config: cfg,
+        now: 1_000_000 + index,
+      })
+
+      const fullTokens = estimateConversationTokens(history)
+      const laneTokens = estimateConversationTokens(routed.laneHistory)
+      ratios.push(laneTokens / Math.max(fullTokens, 1))
+    }
+
+    assert.ok(ratios.some((ratio) => ratio < 0.99))
+    assert.ok(ratios.every((ratio) => ratio >= 0.75))
+  })
+})

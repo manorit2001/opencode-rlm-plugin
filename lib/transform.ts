@@ -124,7 +124,8 @@ function buildArchiveContext(messages: ChatMessage[], maxArchiveChars: number): 
   }
 
   let remaining = maxArchiveChars
-  const chunks: string[] = []
+  const historicalChunks: string[] = []
+  let vectorChunk: string | null = null
 
   if (compactedVector) {
     const serializedVector = `[assistant]\n${compactedVector}`
@@ -134,13 +135,13 @@ function buildArchiveContext(messages: ChatMessage[], maxArchiveChars: number): 
         : serializedVector
 
     if (boundedVector.length > 0) {
-      chunks.push(boundedVector)
+      vectorChunk = boundedVector
       remaining -= boundedVector.length
     }
   }
 
   if (remaining <= 0) {
-    return chunks.join("\n\n")
+    return vectorChunk ?? ""
   }
 
   for (let index = messages.length - 1; index >= startIndex && remaining > 0; index -= 1) {
@@ -155,12 +156,16 @@ function buildArchiveContext(messages: ChatMessage[], maxArchiveChars: number): 
     }
 
     const bounded = serialized.length > remaining ? serialized.slice(serialized.length - remaining) : serialized
-    chunks.push(bounded)
+    historicalChunks.push(bounded)
     remaining -= bounded.length
   }
 
-  chunks.reverse()
-  return chunks.join("\n\n")
+  historicalChunks.reverse()
+  if (vectorChunk) {
+    return [vectorChunk, ...historicalChunks].join("\n\n")
+  }
+
+  return historicalChunks.join("\n\n")
 }
 
 function latestUserGoal(messages: ChatMessage[]): string {

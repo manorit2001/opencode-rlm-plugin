@@ -24,7 +24,10 @@ export const DEFAULT_CONFIG: RecursiveConfig = {
   laneSemanticWeight: 0.2,
   laneSemanticAmbiguityTopScore: 0.62,
   laneSemanticAmbiguityGap: 0.08,
+  laneMinHistoryTokenRatio: 0.75,
   laneDbPath: ".opencode/rlm-context-lanes.sqlite",
+  laneBucketsUseSessions: false,
+  laneSessionTitlePrefix: "Project",
   keepRecentMessages: 8,
   maxArchiveChars: 60000,
   maxFocusedContextChars: 4500,
@@ -196,7 +199,23 @@ export function getConfig(): RecursiveConfig {
     0,
     0.5,
   )
+  const laneMinHistoryTokenRatio = clamp(
+    readNumber(
+      "RLM_PLUGIN_LANES_MIN_HISTORY_TOKEN_RATIO",
+      DEFAULT_CONFIG.laneMinHistoryTokenRatio ?? 0.75,
+    ),
+    0,
+    1,
+  )
   const laneDbPath = readString("RLM_PLUGIN_LANES_DB_PATH", DEFAULT_CONFIG.laneDbPath)
+  const laneBucketsUseSessions = readBoolean(
+    "RLM_PLUGIN_LANES_SESSION_BUCKETS_ENABLED",
+    DEFAULT_CONFIG.laneBucketsUseSessions ?? false,
+  )
+  const laneSessionTitlePrefix = readString(
+    "RLM_PLUGIN_LANES_SESSION_TITLE_PREFIX",
+    DEFAULT_CONFIG.laneSessionTitlePrefix ?? "Project",
+  )
   const keepRecentMessages = Math.max(
     2,
     Math.floor(readNumber("RLM_PLUGIN_KEEP_RECENT", DEFAULT_CONFIG.keepRecentMessages)),
@@ -257,7 +276,10 @@ export function getConfig(): RecursiveConfig {
     laneSemanticWeight,
     laneSemanticAmbiguityTopScore,
     laneSemanticAmbiguityGap,
+    laneMinHistoryTokenRatio,
     laneDbPath,
+    laneBucketsUseSessions,
+    laneSessionTitlePrefix,
     keepRecentMessages,
     maxArchiveChars,
     maxFocusedContextChars,
