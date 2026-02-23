@@ -14,10 +14,12 @@ import {
   createSessionRuntimeStats,
   formatRuntimeStats,
   formatTokenEfficiencyStats,
+  recordLaneTelemetry,
   type SessionRuntimeStats,
 } from "./lib/runtime-stats.js"
 
 const FOCUSED_CONTEXT_TAG = "[RLM_FOCUSED_CONTEXT]"
+const INTERNAL_CONTEXT_HANDOFF_TAG = "[RLM_INTERNAL_CONTEXT_HANDOFF]"
 
 function statsForSession(
   statsBySession: Map<string, SessionRuntimeStats>,
@@ -32,6 +34,33 @@ function statsForSession(
   const created = createSessionRuntimeStats(now)
   statsBySession.set(sessionID, created)
   return created
+}
+
+function unwrapData(response: unknown): unknown {
+  if (!response || typeof response !== "object") {
+    return response
+  }
+
+  const record = response as Record<string, unknown>
+  if (Object.hasOwn(record, "data")) {
+    return record.data
+  }
+
+  return response
+}
+
+function normalizeLaneSessionTitle(prefix: string | undefined, laneTitle: string): string {
+  const cleanPrefix = (prefix ?? "Project").trim()
+  const cleanTitle = laneTitle.trim()
+  if (cleanPrefix.length === 0) {
+    return cleanTitle
+  }
+
+  if (cleanTitle.length === 0) {
+    return cleanPrefix
+  }
+
+  return `${cleanPrefix}: ${cleanTitle}`
 }
 
 function normalizeMessage(entry: unknown): ChatMessage | null {
@@ -98,7 +127,7 @@ function prependFocusedContext(parts: unknown[], focusedContext: string): void {
   }
 }
 
-function isInternalFocusedContextPrompt(parts: unknown[]): boolean {
+function isInternalPluginPrompt(parts: unknown[]): boolean {
   for (const part of parts) {
     if (!part || typeof part !== "object") {
       continue
@@ -109,12 +138,34 @@ function isInternalFocusedContextPrompt(parts: unknown[]): boolean {
       continue
     }
 
-    if (record.text.startsWith(INTERNAL_FOCUSED_CONTEXT_PROMPT_TAG)) {
+    if (
+      record.text.startsWith(INTERNAL_FOCUSED_CONTEXT_PROMPT_TAG) ||
+      record.text.startsWith(INTERNAL_CONTEXT_HANDOFF_TAG)
+    ) {
       return true
     }
   }
 
   return false
+}
+
+function buildOwnerHandoffPrompt(
+  rootSessionID: string,
+  latestUserText: string,
+  route: { contextID: string; contextTitle: string; isPrimary: boolean },
+): string {
+  const role = route.isPrimary ? "primary" : "secondary"
+  return [
+    INTERNAL_CONTEXT_HANDOFF_TAG,
+    "This is an internal lane handoff message.",
+    `Root session: ${rootSessionID}`,
+    `Lane role: ${role}`,
+    `Lane context ID: ${route.contextID}`,
+    `Lane title: ${route.contextTitle}`,
+    "Latest user message:",
+    latestUserText,
+    "Continue this subtask in this session with concrete next actions.",
+  ].join("\n")
 }
 
 function textFromParts(parts: unknown[]): string {
@@ -169,7 +220,10 @@ function formatContextsOutput(
   for (const context of contexts) {
     const marker = context.id === primaryContextID ? "*" : "-"
     const summary = context.summary.replace(/\s+/g, " ").slice(0, 120)
-    lines.push(`${marker} ${context.id} | ${context.title} | msgs=${context.msgCount} | last=${context.lastActiveAt} | ${summary}`)
+    const owner = context.ownerSessionID ?? "none"
+    lines.push(
+      `${marker} ${context.id} | ${context.title} | owner=${owner} | msgs=${context.msgCount} | last=${context.lastActiveAt} | ${summary}`,
+    )
   }
 
   return lines.join("\n")
@@ -192,8 +246,72 @@ function formatSwitchEventsOutput(laneOrchestrator: ContextLaneOrchestrator, ses
 const plugin: Plugin = (async (ctx) => {
   const config = getConfig()
   const laneStore = new ContextLaneStore(ctx.directory, config.laneDbPath)
-  const laneOrchestrator = new ContextLaneOrchestrator(laneStore)
+  const laneOrchestrator = new ContextLaneOrchestrator(
+    laneStore,
+    fetch,
+    config.laneBucketsUseSessions
+      ? async ({ rootSessionID, laneTitle }) => {
+          const title = normalizeLaneSessionTitle(config.laneSessionTitlePrefix, laneTitle)
+          const createdRaw = await ctx.client.session.create({
+            body: {
+              parentID: rootSessionID,
+              title,
+            },
+          })
+          const created = unwrapData(createdRaw)
+          if (!created || typeof created !== "object") {
+            return { laneTitle: title }
+          }
+
+          const sessionID = (created as Record<string, unknown>).id
+          if (typeof sessionID !== "string" || sessionID.trim().length === 0) {
+            return { laneTitle: title }
+          }
+
+          return {
+            contextID: sessionID,
+            laneTitle: title,
+          }
+        }
+      : undefined,
+  )
   const statsBySession = new Map<string, SessionRuntimeStats>()
+
+  const notifyOwnerSessions = async (
+    rootSessionID: string,
+    latestUserText: string,
+    ownerRoutes: Array<{ ownerSessionID: string; contextID: string; contextTitle: string; isPrimary: boolean }>,
+  ): Promise<void> => {
+    if (latestUserText.trim().length === 0 || ownerRoutes.length === 0) {
+      return
+    }
+
+    const seenOwners = new Set<string>()
+    for (const route of ownerRoutes) {
+      if (route.ownerSessionID === rootSessionID || seenOwners.has(route.ownerSessionID)) {
+        continue
+      }
+
+      seenOwners.add(route.ownerSessionID)
+      try {
+        await ctx.client.session.prompt({
+          path: { id: route.ownerSessionID },
+          body: {
+            parts: [
+              {
+                type: "text",
+                text: buildOwnerHandoffPrompt(rootSessionID, latestUserText, route),
+              },
+            ],
+          },
+        })
+      } catch (error) {
+        if (process.env.RLM_PLUGIN_DEBUG === "1") {
+          console.error(`RLM plugin failed to notify owner session ${route.ownerSessionID}`, error)
+        }
+      }
+    }
+  }
 
   return {
     tool: {
@@ -290,7 +408,7 @@ const plugin: Plugin = (async (ctx) => {
       sessionStats.lastSeenAt = now
 
       const parts: unknown[] = output.parts
-      if (isInternalFocusedContextPrompt(parts)) {
+      if (isInternalPluginPrompt(parts)) {
         sessionStats.lastDecision = "skipped-internal-focused-context-prompt"
         return
       }
@@ -320,6 +438,7 @@ const plugin: Plugin = (async (ctx) => {
 
       const latestUserText = textFromParts(parts) || latestUserTextFromHistory(history)
       let historyForTransform = history
+      let ownerRoutes: Array<{ ownerSessionID: string; contextID: string; contextTitle: string; isPrimary: boolean }> = []
       if (config.laneRoutingEnabled && latestUserText.length > 0) {
         sessionStats.laneRoutingRuns += 1
         const routed = await laneOrchestrator.route({
@@ -331,6 +450,7 @@ const plugin: Plugin = (async (ctx) => {
           now,
         })
         historyForTransform = routed.laneHistory
+        ownerRoutes = routed.ownerRoutes
         if (routed.selection.createdNewContext) {
           sessionStats.laneNewContextCount += 1
         }
@@ -344,12 +464,27 @@ const plugin: Plugin = (async (ctx) => {
 
         const laneTokenEstimate = estimateConversationTokens(historyForTransform)
         const laneSavedTokens = Math.max(0, baselineTokenEstimate - laneTokenEstimate)
+
+        recordLaneTelemetry(sessionStats, {
+          at: now,
+          baselineTokens: baselineTokenEstimate,
+          laneScopedTokens: laneTokenEstimate,
+          historyMessages: history.length,
+          laneHistoryMessages: historyForTransform.length,
+          primaryContextID: routed.selection.primaryContextID,
+          createdNewContext: routed.selection.createdNewContext,
+        })
+
         sessionStats.laneRoutingSamples += 1
         sessionStats.totalBaselineTokens += baselineTokenEstimate
         sessionStats.totalLaneScopedTokens += laneTokenEstimate
         sessionStats.totalLaneSavedTokens += laneSavedTokens
         sessionStats.lastLaneScopedTokenEstimate = laneTokenEstimate
         sessionStats.lastLaneSavedTokens = laneSavedTokens
+
+        if (config.laneBucketsUseSessions) {
+          await notifyOwnerSessions(sessionID, latestUserText, ownerRoutes)
+        }
       }
 
       const run =
