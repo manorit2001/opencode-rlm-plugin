@@ -64,3 +64,41 @@ export interface ContextSwitchEvent {
   reason: string
   createdAt: number
 }
+
+export interface MessageIntentBucketAssignment {
+  sessionID: string
+  messageID: string
+  bucketType: string
+  contextID: string
+  score: number
+  bucketRank: number
+  reason: string
+  createdAt: number
+}
+
+export interface MessageProgressionStep {
+  sessionID: string
+  messageID: string
+  stepOrder: number
+  stepType: string
+  detailJSON: string
+  createdAt: number
+}
+
+export interface ContextSnapshotRecord {
+  sessionID: string
+  messageID: string
+  snapshotKind: string
+  snapshotIndex: number
+  payloadJSON: string
+  createdAt: number
+}
+
+export interface LaneEventRecord {
+  seq: number
+  sessionID: string
+  messageID: string
+  eventType: string
+  payloadJSON: string
+  createdAt: number
+}

@@ -45,6 +45,8 @@ export interface LaneVisualizationSnapshot {
 
 export interface LaneVisualizationRenderOptions {
   apiPath?: string
+  eventsPath?: string
+  messagePath?: string
 }
 
 const DEFAULT_SESSION_LIMIT = 8
@@ -289,13 +291,16 @@ export function renderLaneVisualizationHTML(
         .join("")
 
       const visible = index === 0 ? "" : " hidden"
-      return `<section class="session-card${visible}" data-session="${escapeHTML(session.sessionID)}"><h2>Session <code>${escapeHTML(session.sessionID)}</code></h2><p class="meta">Last activity: ${toISO(session.lastActivityAt)} | Primary lane: <code>${escapeHTML(session.primaryContextID ?? "none")}</code> | Active lanes: ${session.activeContextCount}</p><h3>Lane Contexts</h3><table><thead><tr><th>Primary</th><th>Context ID</th><th>Title</th><th>Owner Session</th><th>Messages</th><th>Last Active</th><th>Summary</th></tr></thead><tbody>${contextsRows || "<tr><td colspan=\"7\">No contexts for this session.</td></tr>"}</tbody></table><h3>Formation Timeline</h3><table><thead><tr><th>At</th><th>Type</th><th>Context</th><th>Message</th><th>Label</th><th>Detail</th></tr></thead><tbody>${timelineRows || "<tr><td colspan=\"6\">No timeline events for this session.</td></tr>"}</tbody></table></section>`
+      const safeSessionID = escapeHTML(session.sessionID)
+      return `<section class="session-card${visible}" data-session="${safeSessionID}"><h2>Session <code>${safeSessionID}</code></h2><p class="meta">Last activity: ${toISO(session.lastActivityAt)} | Primary lane: <code>${escapeHTML(session.primaryContextID ?? "none")}</code> | Active lanes: ${session.activeContextCount}</p><h3>Lane Contexts</h3><table><thead><tr><th>Primary</th><th>Context ID</th><th>Title</th><th>Owner Session</th><th>Messages</th><th>Last Active</th><th>Summary</th></tr></thead><tbody>${contextsRows || "<tr><td colspan=\"7\">No contexts for this session.</td></tr>"}</tbody></table><h3>Formation Timeline</h3><table><thead><tr><th>At</th><th>Type</th><th>Context</th><th>Message</th><th>Label</th><th>Detail</th></tr></thead><tbody>${timelineRows || "<tr><td colspan=\"6\">No timeline events for this session.</td></tr>"}</tbody></table><h3>Live Progression Events</h3><table><thead><tr><th>Seq</th><th>At</th><th>Type</th><th>Message</th><th>Details</th></tr></thead><tbody id="progression-${safeSessionID}"><tr><td colspan="5">Waiting for live progression events...</td></tr></tbody></table><h3>Message Debug</h3><pre id="message-debug-${safeSessionID}" class="debug-panel">Select an event row to inspect message intent buckets, progression steps, and context snapshots.</pre></section>`
     })
     .join("")
 
   const serialized = escapeHTML(JSON.stringify(snapshot))
   const generatedAt = toISO(snapshot.generatedAt)
   const apiPath = (options.apiPath ?? "/api/snapshot").trim() || "/api/snapshot"
+  const eventsPath = (options.eventsPath ?? "/api/events").trim() || "/api/events"
+  const messagePath = (options.messagePath ?? "/api/message").trim() || "/api/message"
 
   return `<!doctype html>
 <html lang="en">
@@ -358,6 +363,14 @@ export function renderLaneVisualizationHTML(
         font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
         font-size: 12px;
       }
+      .debug-panel {
+        border: 1px solid var(--border);
+        background: #f9fbff;
+        border-radius: 10px;
+        padding: 12px;
+        min-height: 130px;
+        overflow: auto;
+      }
       select {
         border: 1px solid var(--border);
         border-radius: 8px;
@@ -375,20 +388,139 @@ export function renderLaneVisualizationHTML(
         <select id="session-selector">${sessionOptions}</select>
         <span class="meta">Generated at ${generatedAt}. Sessions: ${snapshot.sessions.length}.</span>
         <span class="meta">API: <code>${escapeHTML(apiPath)}</code></span>
+        <span class="meta">Events: <code>${escapeHTML(eventsPath)}</code></span>
       </div>
       ${sessionCards || '<section class="session-card"><p>No sessions were found in the lane database.</p></section>'}
       <script id="rlm-lane-visualization-data" type="application/json">${serialized}</script>
       <script>
+        const apiEventsPath = ${JSON.stringify(eventsPath)};
+        const apiMessagePath = ${JSON.stringify(messagePath)};
         const selector = document.getElementById("session-selector");
         const cards = [...document.querySelectorAll(".session-card[data-session]")];
+        const cursors = Object.create(null);
+
+        function activeSessionID() {
+          if (selector && selector.value) {
+            return selector.value;
+          }
+          const first = cards.find((card) => !card.classList.contains("hidden"));
+          return first ? first.dataset.session : "";
+        }
+
+        async function loadMessageDebug(sessionID, messageID) {
+          const panel = document.getElementById("message-debug-" + sessionID);
+          if (!panel) {
+            return;
+          }
+          try {
+            const url =
+              apiMessagePath +
+              "?sessionID=" +
+              encodeURIComponent(sessionID) +
+              "&messageID=" +
+              encodeURIComponent(messageID) +
+              "&limit=160";
+            const response = await fetch(url);
+            if (!response.ok) {
+              panel.textContent = "Failed to load message debug (" + response.status + ")";
+              return;
+            }
+            const payload = await response.json();
+            panel.textContent = JSON.stringify(payload, null, 2);
+          } catch (error) {
+            panel.textContent = "Failed to load message debug: " + error;
+          }
+        }
+
+        async function pollEvents() {
+          const sessionID = activeSessionID();
+          if (!sessionID) {
+            return;
+          }
+
+          const tbody = document.getElementById("progression-" + sessionID);
+          if (!tbody) {
+            return;
+          }
+
+          const afterSeq = Number(cursors[sessionID] || 0);
+          try {
+            const url =
+              apiEventsPath +
+              "?sessionID=" +
+              encodeURIComponent(sessionID) +
+              "&afterSeq=" +
+              afterSeq +
+              "&limit=120";
+            const response = await fetch(url);
+            if (!response.ok) {
+              return;
+            }
+
+            const payload = await response.json();
+            const events = Array.isArray(payload.events) ? payload.events : [];
+            if (events.length === 0) {
+              return;
+            }
+
+            if (tbody.children.length === 1 && tbody.textContent.includes("Waiting for live progression events")) {
+              tbody.innerHTML = "";
+            }
+
+            for (const event of events) {
+              const row = document.createElement("tr");
+              const at = typeof event.createdAt === "number" ? new Date(event.createdAt).toISOString() : "-";
+              row.innerHTML =
+                "<td>" +
+                event.seq +
+                "</td><td>" +
+                at +
+                "</td><td>" +
+                event.eventType +
+                "</td><td><code>" +
+                event.messageID +
+                "</code></td><td><code>" +
+                event.payloadJSON +
+                "</code></td>";
+              row.style.cursor = "pointer";
+              row.addEventListener("click", () => {
+                loadMessageDebug(sessionID, event.messageID);
+              });
+              tbody.appendChild(row);
+            }
+
+            while (tbody.children.length > 200) {
+              tbody.removeChild(tbody.firstChild);
+            }
+
+            const nextSeq = Number(payload.lastSeq || afterSeq);
+            if (nextSeq > afterSeq) {
+              cursors[sessionID] = nextSeq;
+            }
+          } catch {
+            // Ignore transient poll failures.
+          }
+        }
+
         if (selector) {
           selector.addEventListener("change", () => {
             const value = selector.value;
             cards.forEach((card) => {
               card.classList.toggle("hidden", card.dataset.session !== value);
             });
+            if (!(value in cursors)) {
+              cursors[value] = 0;
+            }
+            pollEvents();
           });
         }
+
+        const initial = activeSessionID();
+        if (initial) {
+          cursors[initial] = 0;
+        }
+        pollEvents();
+        setInterval(pollEvents, 1500);
       </script>
     </main>
   </body>

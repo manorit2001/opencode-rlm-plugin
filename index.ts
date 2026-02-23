@@ -248,6 +248,38 @@ function formatSwitchEventsOutput(laneOrchestrator: ContextLaneOrchestrator, ses
     .join("\n")
 }
 
+function stringifyDetail(value: unknown): string {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return JSON.stringify({ error: "non-serializable-detail" })
+  }
+}
+
+function historySnapshotPayload(history: ChatMessage[]): Array<{ id: string; role: string; text: string }> {
+  return history.map((message) => ({
+    id: message.id ?? "",
+    role: message.role ?? "unknown",
+    text: textFromParts(message.parts ?? []),
+  }))
+}
+
+function delegationHintForSession(laneOrchestrator: ContextLaneOrchestrator, sessionID: string): string | null {
+  const primaryContextID = laneOrchestrator.currentPrimaryContextID(sessionID)
+  if (!primaryContextID) {
+    return null
+  }
+
+  const contexts = laneOrchestrator.listContexts(sessionID, 64)
+  const primary = contexts.find((context) => context.id === primaryContextID)
+  const ownerSessionID = primary?.ownerSessionID?.trim() ?? ""
+  if (ownerSessionID.length === 0) {
+    return null
+  }
+
+  return `Delegation target: ${ownerSessionID} (open with: opencode -s ${ownerSessionID})`
+}
+
 const plugin: Plugin = (async (ctx) => {
   const config = getConfig()
   const laneStore = new ContextLaneStore(ctx.directory, config.laneDbPath)
@@ -430,12 +462,18 @@ const plugin: Plugin = (async (ctx) => {
           const signature = JSON.stringify({ host, port, basePath, defaults })
           if (laneVisualizationWeb && laneVisualizationWebSignature === signature) {
             const apiURL = `${laneVisualizationWeb.url}/api/snapshot`
+            const eventsURL = `${laneVisualizationWeb.url}/api/events`
+            const messageURL = `${laneVisualizationWeb.url}/api/message`
             const healthURL = `${laneVisualizationWeb.url}/health`
+            const delegationHint = delegationHintForSession(laneOrchestrator, defaults.sessionID)
             return [
               `Lane visualization web frontend already running at ${laneVisualizationWeb.url}`,
               `Snapshot API: ${apiURL}`,
+              `Events API: ${eventsURL}`,
+              `Message Debug API: ${messageURL}`,
               `Health check: ${healthURL}`,
               `Default session: ${defaults.sessionID || "none"}`,
+              ...(delegationHint ? [delegationHint] : []),
               "Query params: sessionID, sessionLimit, contextLimit, switchLimit, membershipLimit",
             ].join("\n")
           }
@@ -459,17 +497,29 @@ const plugin: Plugin = (async (ctx) => {
                 switchLimit: options.switchLimit ?? defaults.switchLimit,
                 membershipLimit: options.membershipLimit ?? defaults.membershipLimit,
               }),
+            listEventsAfter: (sessionID, afterSeq, limit) => laneStore.listLaneEventsAfter(sessionID, afterSeq, limit),
+            getMessageDebug: (sessionID, messageID, limit) => ({
+              intentBuckets: laneStore.listIntentBucketAssignments(sessionID, messageID, limit),
+              progression: laneStore.listProgressionSteps(sessionID, messageID, limit),
+              snapshots: laneStore.listContextSnapshots(sessionID, messageID, null, limit),
+            }),
           })
           laneVisualizationWebSignature = signature
 
           const apiURL = `${laneVisualizationWeb.url}/api/snapshot`
+          const eventsURL = `${laneVisualizationWeb.url}/api/events`
+          const messageURL = `${laneVisualizationWeb.url}/api/message`
           const healthURL = `${laneVisualizationWeb.url}/health`
+          const delegationHint = delegationHintForSession(laneOrchestrator, defaults.sessionID)
 
           return [
             `Lane visualization web frontend started at ${laneVisualizationWeb.url}`,
             `Snapshot API: ${apiURL}`,
+            `Events API: ${eventsURL}`,
+            `Message Debug API: ${messageURL}`,
             `Health check: ${healthURL}`,
             `Default session: ${defaults.sessionID || "none"}`,
+            ...(delegationHint ? [delegationHint] : []),
             "Query params: sessionID, sessionLimit, contextLimit, switchLimit, membershipLimit",
           ].join("\n")
         },
@@ -497,13 +547,29 @@ const plugin: Plugin = (async (ctx) => {
 
       const sessionID = output.message.sessionID
       const now = Date.now()
+      const messageID = output.message.id ?? `message-${now}`
       const sessionStats = statsForSession(statsBySession, sessionID, now)
       sessionStats.messagesSeen += 1
       sessionStats.lastSeenAt = now
 
+      const recordProgress = (stepType: string, detail: unknown): void => {
+        try {
+          const at = Date.now()
+          const detailJSON = stringifyDetail(detail)
+          laneStore.appendProgressionStep(sessionID, messageID, stepType, detailJSON, at)
+          laneStore.appendLaneEvent(sessionID, messageID, stepType, detailJSON, at)
+        } catch (error) {
+          if (process.env.RLM_PLUGIN_DEBUG === "1") {
+            console.error("RLM plugin failed to persist progression event", error)
+          }
+        }
+      }
+
       const parts: unknown[] = output.parts
+      recordProgress("message.received", { partCount: parts.length })
       if (isInternalPluginPrompt(parts)) {
         sessionStats.lastDecision = "skipped-internal-focused-context-prompt"
+        recordProgress("message.skipped.internal-prompt", { reason: "internal-focused-context-prompt" })
         return
       }
 
@@ -515,6 +581,7 @@ const plugin: Plugin = (async (ctx) => {
       } catch (error) {
         sessionStats.historyFetchFailures += 1
         sessionStats.lastDecision = "skipped-history-fetch-failed"
+        recordProgress("message.skipped.history-fetch-failed", { reason: "history-fetch-failed" })
         if (process.env.RLM_PLUGIN_DEBUG === "1") {
           console.error("RLM plugin failed to read session history", error)
         }
@@ -524,8 +591,11 @@ const plugin: Plugin = (async (ctx) => {
       const history = normalizeMessages(historyResponse)
       if (history.length === 0) {
         sessionStats.lastDecision = "skipped-empty-history"
+        recordProgress("message.skipped.empty-history", { reason: "empty-history" })
         return
       }
+
+      recordProgress("history.loaded", { messages: history.length })
 
       const baselineTokenEstimate = estimateConversationTokens(history)
       sessionStats.lastBaselineTokenEstimate = baselineTokenEstimate
@@ -533,11 +603,13 @@ const plugin: Plugin = (async (ctx) => {
       const latestUserText = textFromParts(parts) || latestUserTextFromHistory(history)
       let historyForTransform = history
       let ownerRoutes: Array<{ ownerSessionID: string; contextID: string; contextTitle: string; isPrimary: boolean }> = []
+      let routedPrimaryContextID: string | null = null
+      let laneTokenEstimate: number | null = null
       if (config.laneRoutingEnabled && latestUserText.length > 0) {
         sessionStats.laneRoutingRuns += 1
         const routed = await laneOrchestrator.route({
           sessionID,
-          messageID: output.message.id,
+          messageID,
           latestUserText,
           history,
           config,
@@ -545,9 +617,31 @@ const plugin: Plugin = (async (ctx) => {
         })
         historyForTransform = routed.laneHistory
         ownerRoutes = routed.ownerRoutes
+        routedPrimaryContextID = routed.selection.primaryContextID
         if (routed.selection.createdNewContext) {
           sessionStats.laneNewContextCount += 1
         }
+
+        const sortedScores = routed.selection.scores
+          .map((entry) => ({ contextID: entry.contextID, score: entry.score }))
+          .sort((left, right) => {
+            if (right.score !== left.score) {
+              return right.score - left.score
+            }
+            return left.contextID.localeCompare(right.contextID)
+          })
+        laneStore.saveIntentBucketAssignments(
+          sessionID,
+          messageID,
+          sortedScores.map((entry, index) => ({
+            bucketType: index === 0 ? "primary" : "secondary",
+            contextID: entry.contextID,
+            score: entry.score,
+            bucketRank: index,
+            reason: entry.contextID === routed.selection.primaryContextID ? "selected-primary" : "selected-secondary",
+          })),
+          now,
+        )
 
         if (process.env.RLM_PLUGIN_DEBUG === "1") {
           const secondaries = routed.selection.secondaryContextIDs.join(",") || "none"
@@ -556,7 +650,7 @@ const plugin: Plugin = (async (ctx) => {
           )
         }
 
-        const laneTokenEstimate = estimateConversationTokens(historyForTransform)
+        laneTokenEstimate = estimateConversationTokens(historyForTransform)
         const laneSavedTokens = Math.max(0, baselineTokenEstimate - laneTokenEstimate)
 
         recordLaneTelemetry(sessionStats, {
@@ -576,10 +670,51 @@ const plugin: Plugin = (async (ctx) => {
         sessionStats.lastLaneScopedTokenEstimate = laneTokenEstimate
         sessionStats.lastLaneSavedTokens = laneSavedTokens
 
+        const primaryOwnerRoute = ownerRoutes.find((route) => route.isPrimary) ?? null
+        const delegation = primaryOwnerRoute
+          ? {
+              ownerSessionID: primaryOwnerRoute.ownerSessionID,
+              openCommand: `opencode -s ${primaryOwnerRoute.ownerSessionID}`,
+              mode: "reuse-existing-owner-session",
+            }
+          : null
+
+        recordProgress("routing.completed", {
+          primaryContextID: routed.selection.primaryContextID,
+          secondaryContextIDs: routed.selection.secondaryContextIDs,
+          createdNewContext: routed.selection.createdNewContext,
+          ownerRoutes,
+          laneHistoryMessages: historyForTransform.length,
+          delegation,
+        })
+
         if (config.laneBucketsUseSessions) {
           await notifyOwnerSessions(sessionID, latestUserText, ownerRoutes)
+          if (ownerRoutes.length > 0) {
+            recordProgress("delegation.notified-owner-session", {
+              ownerSessionIDs: ownerRoutes.map((route) => route.ownerSessionID),
+            })
+          }
         }
       }
+
+      laneStore.saveContextSnapshot(
+        sessionID,
+        messageID,
+        "model-input",
+        0,
+        stringifyDetail({
+          primaryContextID: routedPrimaryContextID,
+          baselineTokenEstimate,
+          laneTokenEstimate,
+          history: historySnapshotPayload(historyForTransform),
+        }),
+        Date.now(),
+      )
+      recordProgress("context.prepared", {
+        historyMessages: historyForTransform.length,
+        primaryContextID: routedPrimaryContextID,
+      })
 
       const run =
         config.backend === "opencode"
@@ -602,6 +737,11 @@ const plugin: Plugin = (async (ctx) => {
         sessionStats.compactionsSkipped += 1
         sessionStats.lastFocusedChars = 0
         sessionStats.lastDecision = run.pressure < config.pressureThreshold ? "skipped-pressure" : "skipped-no-focused-context"
+        recordProgress("compaction.skipped", {
+          pressure: run.pressure,
+          tokenEstimate: run.tokenEstimate,
+          reason: sessionStats.lastDecision,
+        })
         return
       }
 
@@ -609,6 +749,23 @@ const plugin: Plugin = (async (ctx) => {
       sessionStats.compactionsApplied += 1
       sessionStats.lastFocusedChars = run.focusedContext.length
       sessionStats.lastDecision = "compacted"
+      laneStore.saveContextSnapshot(
+        sessionID,
+        messageID,
+        "focused-context",
+        0,
+        stringifyDetail({
+          focusedContext: run.focusedContext,
+          pressure: run.pressure,
+          tokenEstimate: run.tokenEstimate,
+        }),
+        Date.now(),
+      )
+      recordProgress("compaction.applied", {
+        focusedContextChars: run.focusedContext.length,
+        pressure: run.pressure,
+        tokenEstimate: run.tokenEstimate,
+      })
     },
   }
 }) satisfies Plugin

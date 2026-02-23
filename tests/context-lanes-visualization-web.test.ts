@@ -40,6 +40,12 @@ test("lane visualization web server serves HTML dashboard and snapshot API", asy
         membershipLimit: 240,
       },
       buildSnapshot: (options) => buildLaneVisualizationSnapshot(store, orchestrator, options),
+      listEventsAfter: (sessionID, afterSeq, limit) => store.listLaneEventsAfter(sessionID, afterSeq, limit),
+      getMessageDebug: (sessionID, messageID, limit) => ({
+        intentBuckets: store.listIntentBucketAssignments(sessionID, messageID, limit),
+        progression: store.listProgressionSteps(sessionID, messageID, limit),
+        snapshots: store.listContextSnapshots(sessionID, messageID, null, limit),
+      }),
     })
 
     try {
@@ -49,6 +55,59 @@ test("lane visualization web server serves HTML dashboard and snapshot API", asy
       assert.ok(html.includes("RLM Context Lane Visualization"))
       assert.ok(html.includes("session-selector"))
       assert.ok(html.includes("API:"))
+      assert.ok(html.includes("Events:"))
+
+      store.appendLaneEvent("session-web", "msg-web-1", "message.received", JSON.stringify({ step: 1 }), now + 2_000)
+      store.appendProgressionStep(
+        "session-web",
+        "msg-web-1",
+        "message.received",
+        JSON.stringify({ step: 1 }),
+        now + 2_000,
+      )
+      store.saveIntentBucketAssignments(
+        "session-web",
+        "msg-web-1",
+        [
+          {
+            bucketType: "primary",
+            contextID: "context-web",
+            score: 0.95,
+            bucketRank: 0,
+            reason: "selected-primary",
+          },
+        ],
+        now + 2_000,
+      )
+      store.saveContextSnapshot(
+        "session-web",
+        "msg-web-1",
+        "model-input",
+        0,
+        JSON.stringify({ historyMessages: 1 }),
+        now + 2_000,
+      )
+
+      const eventsResponse = await fetch(`${server.url}/api/events?sessionID=session-web&afterSeq=0&limit=10`)
+      assert.equal(eventsResponse.status, 200)
+      const eventsPayload = (await eventsResponse.json()) as {
+        count: number
+        events: Array<{ messageID: string; eventType: string }>
+      }
+      assert.equal(eventsPayload.count, 1)
+      assert.equal(eventsPayload.events[0]?.messageID, "msg-web-1")
+      assert.equal(eventsPayload.events[0]?.eventType, "message.received")
+
+      const messageResponse = await fetch(`${server.url}/api/message?sessionID=session-web&messageID=msg-web-1&limit=20`)
+      assert.equal(messageResponse.status, 200)
+      const messagePayload = (await messageResponse.json()) as {
+        intentBuckets: Array<{ bucketType: string }>
+        progression: Array<{ stepType: string }>
+        snapshots: Array<{ snapshotKind: string }>
+      }
+      assert.equal(messagePayload.intentBuckets[0]?.bucketType, "primary")
+      assert.equal(messagePayload.progression[0]?.stepType, "message.received")
+      assert.equal(messagePayload.snapshots[0]?.snapshotKind, "model-input")
 
       const apiResponse = await fetch(`${server.url}/api/snapshot`)
       assert.equal(apiResponse.status, 200)
@@ -90,6 +149,12 @@ test("lane visualization web server honors basePath and query overrides", async 
         membershipLimit: 240,
       },
       buildSnapshot: (options) => buildLaneVisualizationSnapshot(store, orchestrator, options),
+      listEventsAfter: (sessionID, afterSeq, limit) => store.listLaneEventsAfter(sessionID, afterSeq, limit),
+      getMessageDebug: (sessionID, messageID, limit) => ({
+        intentBuckets: store.listIntentBucketAssignments(sessionID, messageID, limit),
+        progression: store.listProgressionSteps(sessionID, messageID, limit),
+        snapshots: store.listContextSnapshots(sessionID, messageID, null, limit),
+      }),
     })
 
     try {

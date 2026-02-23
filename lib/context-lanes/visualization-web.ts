@@ -1,5 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { renderLaneVisualizationHTML, type LaneVisualizationOptions, type LaneVisualizationSnapshot } from "./visualization.js"
+import type {
+  ContextSnapshotRecord,
+  LaneEventRecord,
+  MessageIntentBucketAssignment,
+  MessageProgressionStep,
+} from "./types.js"
 
 interface LaneVisualizationSnapshotDefaults {
   sessionID: string
@@ -15,6 +21,12 @@ export interface StartLaneVisualizationWebServerOptions {
   basePath?: string
   defaults: LaneVisualizationSnapshotDefaults
   buildSnapshot: (options: LaneVisualizationOptions) => LaneVisualizationSnapshot
+  listEventsAfter: (sessionID: string, afterSeq: number, limit: number) => LaneEventRecord[]
+  getMessageDebug: (sessionID: string, messageID: string, limit: number) => {
+    intentBuckets: MessageIntentBucketAssignment[]
+    progression: MessageProgressionStep[]
+    snapshots: ContextSnapshotRecord[]
+  }
 }
 
 export interface LaneVisualizationWebServerHandle {
@@ -49,6 +61,19 @@ function parsePositiveInt(raw: string | null, fallback: number): number {
   }
 
   return Math.max(1, Math.floor(parsed))
+}
+
+function parseNonNegativeInt(raw: string | null, fallback: number): number {
+  if (!raw) {
+    return fallback
+  }
+
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed)) {
+    return fallback
+  }
+
+  return Math.max(0, Math.floor(parsed))
 }
 
 function optionsFromQuery(
@@ -90,6 +115,12 @@ function routeRequest(
   res: ServerResponse,
   defaults: LaneVisualizationSnapshotDefaults,
   buildSnapshot: (options: LaneVisualizationOptions) => LaneVisualizationSnapshot,
+  listEventsAfter: (sessionID: string, afterSeq: number, limit: number) => LaneEventRecord[],
+  getMessageDebug: (sessionID: string, messageID: string, limit: number) => {
+    intentBuckets: MessageIntentBucketAssignment[]
+    progression: MessageProgressionStep[]
+    snapshots: ContextSnapshotRecord[]
+  },
   basePath: string,
 ): void {
   if (req.method !== "GET") {
@@ -99,6 +130,8 @@ function routeRequest(
 
   const requestURL = new URL(req.url ?? "/", "http://127.0.0.1")
   const apiPath = basePath === "/" ? "/api/snapshot" : `${basePath}/api/snapshot`
+  const eventsPath = basePath === "/" ? "/api/events" : `${basePath}/api/events`
+  const messagePath = basePath === "/" ? "/api/message" : `${basePath}/api/message`
   const healthPath = basePath === "/" ? "/health" : `${basePath}/health`
 
   if (isRoute(requestURL.pathname, healthPath)) {
@@ -106,6 +139,8 @@ function routeRequest(
       ok: true,
       basePath,
       apiPath,
+      eventsPath,
+      messagePath,
       generatedAt: Date.now(),
     })
     return
@@ -117,9 +152,50 @@ function routeRequest(
     return
   }
 
+  if (isRoute(requestURL.pathname, eventsPath)) {
+    const fallbackSessionID = defaults.sessionID.trim()
+    const sessionID = (requestURL.searchParams.get("sessionID") ?? fallbackSessionID).trim()
+    if (sessionID.length === 0) {
+      writeJSON(res, 400, { error: "sessionID-required" })
+      return
+    }
+
+    const afterSeq = parseNonNegativeInt(requestURL.searchParams.get("afterSeq"), 0)
+    const limit = parsePositiveInt(requestURL.searchParams.get("limit"), 100)
+    const events = listEventsAfter(sessionID, afterSeq, limit)
+    const lastSeq = events.length > 0 ? events[events.length - 1]?.seq ?? afterSeq : afterSeq
+    writeJSON(res, 200, {
+      sessionID,
+      afterSeq,
+      count: events.length,
+      lastSeq,
+      events,
+    })
+    return
+  }
+
+  if (isRoute(requestURL.pathname, messagePath)) {
+    const fallbackSessionID = defaults.sessionID.trim()
+    const sessionID = (requestURL.searchParams.get("sessionID") ?? fallbackSessionID).trim()
+    const messageID = (requestURL.searchParams.get("messageID") ?? "").trim()
+    if (sessionID.length === 0 || messageID.length === 0) {
+      writeJSON(res, 400, { error: "sessionID-and-messageID-required" })
+      return
+    }
+
+    const limit = parsePositiveInt(requestURL.searchParams.get("limit"), 120)
+    const data = getMessageDebug(sessionID, messageID, limit)
+    writeJSON(res, 200, {
+      sessionID,
+      messageID,
+      ...data,
+    })
+    return
+  }
+
   if (isRoute(requestURL.pathname, basePath)) {
     const snapshot = buildSnapshot(optionsFromQuery(requestURL, defaults))
-    const html = renderLaneVisualizationHTML(snapshot, { apiPath })
+    const html = renderLaneVisualizationHTML(snapshot, { apiPath, eventsPath, messagePath })
     writeText(res, 200, "text/html; charset=utf-8", html)
     return
   }
@@ -127,7 +203,7 @@ function routeRequest(
   writeJSON(res, 404, {
     error: "not-found",
     basePath,
-    routes: [basePath, apiPath, healthPath],
+    routes: [basePath, apiPath, eventsPath, messagePath, healthPath],
   })
 }
 
@@ -168,7 +244,7 @@ export async function startLaneVisualizationWebServer(
   const basePath = normalizeBasePath(options.basePath)
 
   const server = createServer((req, res) => {
-    routeRequest(req, res, options.defaults, options.buildSnapshot, basePath)
+    routeRequest(req, res, options.defaults, options.buildSnapshot, options.listEventsAfter, options.getMessageDebug, basePath)
   })
 
   await listen(server, host, port)

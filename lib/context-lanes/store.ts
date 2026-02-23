@@ -2,7 +2,16 @@ import { mkdirSync } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path"
 import { randomUUID } from "node:crypto"
 import { createRequire } from "node:module"
-import type { ContextLane, ContextStatus, ContextSwitchEvent, MessageContextMembership } from "./types.js"
+import type {
+  ContextLane,
+  ContextSnapshotRecord,
+  ContextStatus,
+  ContextSwitchEvent,
+  LaneEventRecord,
+  MessageContextMembership,
+  MessageIntentBucketAssignment,
+  MessageProgressionStep,
+} from "./types.js"
 
 interface StatementLike {
   run(...params: unknown[]): unknown
@@ -62,6 +71,44 @@ interface SwitchRow {
   created_at: number
 }
 
+interface IntentBucketRow {
+  session_id: string
+  message_id: string
+  bucket_type: string
+  context_id: string
+  score: number
+  bucket_rank: number
+  reason: string
+  created_at: number
+}
+
+interface ProgressionStepRow {
+  session_id: string
+  message_id: string
+  step_order: number
+  step_type: string
+  detail_json: string
+  created_at: number
+}
+
+interface ContextSnapshotRow {
+  session_id: string
+  message_id: string
+  snapshot_kind: string
+  snapshot_index: number
+  payload_json: string
+  created_at: number
+}
+
+interface LaneEventRow {
+  seq: number
+  session_id: string
+  message_id: string
+  event_type: string
+  payload_json: string
+  created_at: number
+}
+
 interface FallbackMembership {
   sessionID: string
   messageID: string
@@ -98,6 +145,44 @@ interface FallbackOverride {
   sessionID: string
   contextID: string
   expiresAt: number
+}
+
+interface FallbackIntentBucket {
+  sessionID: string
+  messageID: string
+  bucketType: string
+  contextID: string
+  score: number
+  bucketRank: number
+  reason: string
+  createdAt: number
+}
+
+interface FallbackProgressionStep {
+  sessionID: string
+  messageID: string
+  stepOrder: number
+  stepType: string
+  detailJSON: string
+  createdAt: number
+}
+
+interface FallbackContextSnapshot {
+  sessionID: string
+  messageID: string
+  snapshotKind: string
+  snapshotIndex: number
+  payloadJSON: string
+  createdAt: number
+}
+
+interface FallbackLaneEvent {
+  seq: number
+  sessionID: string
+  messageID: string
+  eventType: string
+  payloadJSON: string
+  createdAt: number
 }
 
 const require = createRequire(import.meta.url)
@@ -178,6 +263,11 @@ export class ContextLaneStore {
   private readonly fallbackMemberships: FallbackMembership[] = []
   private readonly fallbackSwitches: FallbackSwitch[] = []
   private readonly fallbackOverrides: FallbackOverride[] = []
+  private readonly fallbackIntentBuckets: FallbackIntentBucket[] = []
+  private readonly fallbackProgressionSteps: FallbackProgressionStep[] = []
+  private readonly fallbackContextSnapshots: FallbackContextSnapshot[] = []
+  private readonly fallbackLaneEvents: FallbackLaneEvent[] = []
+  private fallbackLaneEventSeq = 1
 
   constructor(baseDirectory: string, dbPath: string) {
     const resolved = resolveDBPath(baseDirectory, dbPath)
@@ -256,6 +346,59 @@ export class ContextLaneStore {
         context_id TEXT NOT NULL,
         expires_at INTEGER NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS message_intent_buckets (
+        session_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        bucket_type TEXT NOT NULL,
+        context_id TEXT NOT NULL,
+        score REAL NOT NULL,
+        bucket_rank INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (session_id, message_id, bucket_type, context_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_message_intent_buckets_message
+        ON message_intent_buckets (session_id, message_id, bucket_rank ASC);
+
+      CREATE TABLE IF NOT EXISTS message_step_progression (
+        session_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        step_order INTEGER NOT NULL,
+        step_type TEXT NOT NULL,
+        detail_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (session_id, message_id, step_order)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_message_step_progression_message
+        ON message_step_progression (session_id, message_id, step_order ASC);
+
+      CREATE TABLE IF NOT EXISTS context_snapshots (
+        session_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        snapshot_kind TEXT NOT NULL,
+        snapshot_index INTEGER NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (session_id, message_id, snapshot_kind, snapshot_index)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_context_snapshots_message
+        ON context_snapshots (session_id, message_id, snapshot_kind, snapshot_index ASC);
+
+      CREATE TABLE IF NOT EXISTS lane_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_lane_events_session_seq
+        ON lane_events (session_id, seq ASC);
     `)
 
     try {
@@ -709,6 +852,415 @@ export class ContextLaneStore {
       toContextID: row.to_context_id,
       confidence: row.confidence,
       reason: row.reason,
+      createdAt: row.created_at,
+    }))
+  }
+
+  saveIntentBucketAssignments(
+    sessionID: string,
+    messageID: string,
+    assignments: Omit<MessageIntentBucketAssignment, "sessionID" | "messageID" | "createdAt">[],
+    now: number,
+  ): void {
+    const db = this.db
+    if (!db) {
+      const remaining = this.fallbackIntentBuckets.filter(
+        (item) => !(item.sessionID === sessionID && item.messageID === messageID),
+      )
+      this.fallbackIntentBuckets.length = 0
+      this.fallbackIntentBuckets.push(...remaining)
+      for (const assignment of assignments) {
+        this.fallbackIntentBuckets.push({
+          sessionID,
+          messageID,
+          bucketType: assignment.bucketType,
+          contextID: assignment.contextID,
+          score: assignment.score,
+          bucketRank: assignment.bucketRank,
+          reason: assignment.reason,
+          createdAt: now,
+        })
+      }
+      return
+    }
+
+    db
+      .prepare(`DELETE FROM message_intent_buckets WHERE session_id = ? AND message_id = ?`)
+      .run(sessionID, messageID)
+    const statement = db.prepare(
+      `INSERT INTO message_intent_buckets (
+        session_id,
+        message_id,
+        bucket_type,
+        context_id,
+        score,
+        bucket_rank,
+        reason,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    for (const assignment of assignments) {
+      statement.run(
+        sessionID,
+        messageID,
+        assignment.bucketType,
+        assignment.contextID,
+        assignment.score,
+        assignment.bucketRank,
+        assignment.reason,
+        now,
+      )
+    }
+  }
+
+  listIntentBucketAssignments(sessionID: string, messageID: string, limit: number): MessageIntentBucketAssignment[] {
+    const normalizedLimit = Math.max(1, Math.floor(limit))
+    const db = this.db
+    if (!db) {
+      return this.fallbackIntentBuckets
+        .filter((item) => item.sessionID === sessionID && item.messageID === messageID)
+        .sort((left, right) => {
+          if (left.bucketRank !== right.bucketRank) {
+            return left.bucketRank - right.bucketRank
+          }
+          if (right.score !== left.score) {
+            return right.score - left.score
+          }
+          return left.contextID.localeCompare(right.contextID)
+        })
+        .slice(0, normalizedLimit)
+        .map((item) => ({
+          sessionID: item.sessionID,
+          messageID: item.messageID,
+          bucketType: item.bucketType,
+          contextID: item.contextID,
+          score: item.score,
+          bucketRank: item.bucketRank,
+          reason: item.reason,
+          createdAt: item.createdAt,
+        }))
+    }
+
+    const rows = db
+      .prepare(
+        `SELECT session_id, message_id, bucket_type, context_id, score, bucket_rank, reason, created_at
+         FROM message_intent_buckets
+         WHERE session_id = ? AND message_id = ?
+         ORDER BY bucket_rank ASC, score DESC, context_id ASC
+         LIMIT ?`,
+      )
+      .all(sessionID, messageID, normalizedLimit) as unknown as IntentBucketRow[]
+
+    return rows.map((row) => ({
+      sessionID: row.session_id,
+      messageID: row.message_id,
+      bucketType: row.bucket_type,
+      contextID: row.context_id,
+      score: row.score,
+      bucketRank: row.bucket_rank,
+      reason: row.reason,
+      createdAt: row.created_at,
+    }))
+  }
+
+  appendProgressionStep(
+    sessionID: string,
+    messageID: string,
+    stepType: string,
+    detailJSON: string,
+    now: number,
+  ): MessageProgressionStep {
+    const db = this.db
+    if (!db) {
+      let stepOrder = 1
+      for (const step of this.fallbackProgressionSteps) {
+        if (step.sessionID === sessionID && step.messageID === messageID) {
+          stepOrder = Math.max(stepOrder, step.stepOrder + 1)
+        }
+      }
+      const next: FallbackProgressionStep = {
+        sessionID,
+        messageID,
+        stepOrder,
+        stepType,
+        detailJSON,
+        createdAt: now,
+      }
+      this.fallbackProgressionSteps.push(next)
+      return {
+        sessionID,
+        messageID,
+        stepOrder,
+        stepType,
+        detailJSON,
+        createdAt: now,
+      }
+    }
+
+    const row = db
+      .prepare(
+        `SELECT COALESCE(MAX(step_order), 0) + 1 AS next_step
+         FROM message_step_progression
+         WHERE session_id = ? AND message_id = ?`,
+      )
+      .get(sessionID, messageID) as { next_step?: number } | undefined
+    const stepOrder = row?.next_step ?? 1
+
+    db
+      .prepare(
+        `INSERT INTO message_step_progression (session_id, message_id, step_order, step_type, detail_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(sessionID, messageID, stepOrder, stepType, detailJSON, now)
+
+    return {
+      sessionID,
+      messageID,
+      stepOrder,
+      stepType,
+      detailJSON,
+      createdAt: now,
+    }
+  }
+
+  listProgressionSteps(sessionID: string, messageID: string, limit: number): MessageProgressionStep[] {
+    const normalizedLimit = Math.max(1, Math.floor(limit))
+    const db = this.db
+    if (!db) {
+      return this.fallbackProgressionSteps
+        .filter((step) => step.sessionID === sessionID && step.messageID === messageID)
+        .sort((left, right) => left.stepOrder - right.stepOrder)
+        .slice(0, normalizedLimit)
+        .map((step) => ({
+          sessionID: step.sessionID,
+          messageID: step.messageID,
+          stepOrder: step.stepOrder,
+          stepType: step.stepType,
+          detailJSON: step.detailJSON,
+          createdAt: step.createdAt,
+        }))
+    }
+
+    const rows = db
+      .prepare(
+        `SELECT session_id, message_id, step_order, step_type, detail_json, created_at
+         FROM message_step_progression
+         WHERE session_id = ? AND message_id = ?
+         ORDER BY step_order ASC
+         LIMIT ?`,
+      )
+      .all(sessionID, messageID, normalizedLimit) as unknown as ProgressionStepRow[]
+
+    return rows.map((row) => ({
+      sessionID: row.session_id,
+      messageID: row.message_id,
+      stepOrder: row.step_order,
+      stepType: row.step_type,
+      detailJSON: row.detail_json,
+      createdAt: row.created_at,
+    }))
+  }
+
+  saveContextSnapshot(
+    sessionID: string,
+    messageID: string,
+    snapshotKind: string,
+    snapshotIndex: number,
+    payloadJSON: string,
+    now: number,
+  ): ContextSnapshotRecord {
+    const db = this.db
+    if (!db) {
+      const remaining = this.fallbackContextSnapshots.filter(
+        (snapshot) =>
+          !(
+            snapshot.sessionID === sessionID &&
+            snapshot.messageID === messageID &&
+            snapshot.snapshotKind === snapshotKind &&
+            snapshot.snapshotIndex === snapshotIndex
+          ),
+      )
+      this.fallbackContextSnapshots.length = 0
+      this.fallbackContextSnapshots.push(...remaining)
+      this.fallbackContextSnapshots.push({
+        sessionID,
+        messageID,
+        snapshotKind,
+        snapshotIndex,
+        payloadJSON,
+        createdAt: now,
+      })
+      return { sessionID, messageID, snapshotKind, snapshotIndex, payloadJSON, createdAt: now }
+    }
+
+    db
+      .prepare(
+        `INSERT OR REPLACE INTO context_snapshots (
+           session_id,
+           message_id,
+           snapshot_kind,
+           snapshot_index,
+           payload_json,
+           created_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(sessionID, messageID, snapshotKind, snapshotIndex, payloadJSON, now)
+
+    return { sessionID, messageID, snapshotKind, snapshotIndex, payloadJSON, createdAt: now }
+  }
+
+  listContextSnapshots(
+    sessionID: string,
+    messageID: string,
+    snapshotKind: string | null,
+    limit: number,
+  ): ContextSnapshotRecord[] {
+    const normalizedLimit = Math.max(1, Math.floor(limit))
+    const db = this.db
+    if (!db) {
+      const filtered = this.fallbackContextSnapshots.filter((snapshot) => {
+        if (snapshot.sessionID !== sessionID || snapshot.messageID !== messageID) {
+          return false
+        }
+        return snapshotKind === null ? true : snapshot.snapshotKind === snapshotKind
+      })
+      return filtered
+        .sort((left, right) => {
+          if (left.snapshotKind !== right.snapshotKind) {
+            return left.snapshotKind.localeCompare(right.snapshotKind)
+          }
+          return left.snapshotIndex - right.snapshotIndex
+        })
+        .slice(0, normalizedLimit)
+        .map((snapshot) => ({
+          sessionID: snapshot.sessionID,
+          messageID: snapshot.messageID,
+          snapshotKind: snapshot.snapshotKind,
+          snapshotIndex: snapshot.snapshotIndex,
+          payloadJSON: snapshot.payloadJSON,
+          createdAt: snapshot.createdAt,
+        }))
+    }
+
+    if (snapshotKind === null) {
+      const rows = db
+        .prepare(
+          `SELECT session_id, message_id, snapshot_kind, snapshot_index, payload_json, created_at
+           FROM context_snapshots
+           WHERE session_id = ? AND message_id = ?
+           ORDER BY snapshot_kind ASC, snapshot_index ASC
+           LIMIT ?`,
+        )
+        .all(sessionID, messageID, normalizedLimit) as unknown as ContextSnapshotRow[]
+
+      return rows.map((row) => ({
+        sessionID: row.session_id,
+        messageID: row.message_id,
+        snapshotKind: row.snapshot_kind,
+        snapshotIndex: row.snapshot_index,
+        payloadJSON: row.payload_json,
+        createdAt: row.created_at,
+      }))
+    }
+
+    const rows = db
+      .prepare(
+        `SELECT session_id, message_id, snapshot_kind, snapshot_index, payload_json, created_at
+         FROM context_snapshots
+         WHERE session_id = ? AND message_id = ? AND snapshot_kind = ?
+         ORDER BY snapshot_index ASC
+         LIMIT ?`,
+      )
+      .all(sessionID, messageID, snapshotKind, normalizedLimit) as unknown as ContextSnapshotRow[]
+
+    return rows.map((row) => ({
+      sessionID: row.session_id,
+      messageID: row.message_id,
+      snapshotKind: row.snapshot_kind,
+      snapshotIndex: row.snapshot_index,
+      payloadJSON: row.payload_json,
+      createdAt: row.created_at,
+    }))
+  }
+
+  appendLaneEvent(sessionID: string, messageID: string, eventType: string, payloadJSON: string, now: number): LaneEventRecord {
+    const db = this.db
+    if (!db) {
+      const record: FallbackLaneEvent = {
+        seq: this.fallbackLaneEventSeq++,
+        sessionID,
+        messageID,
+        eventType,
+        payloadJSON,
+        createdAt: now,
+      }
+      this.fallbackLaneEvents.push(record)
+      return {
+        seq: record.seq,
+        sessionID,
+        messageID,
+        eventType,
+        payloadJSON,
+        createdAt: now,
+      }
+    }
+
+    db
+      .prepare(
+        `INSERT INTO lane_events (session_id, message_id, event_type, payload_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(sessionID, messageID, eventType, payloadJSON, now)
+
+    const row = db
+      .prepare(`SELECT seq FROM lane_events WHERE rowid = last_insert_rowid()`)
+      .get() as { seq?: number } | undefined
+
+    return {
+      seq: row?.seq ?? 0,
+      sessionID,
+      messageID,
+      eventType,
+      payloadJSON,
+      createdAt: now,
+    }
+  }
+
+  listLaneEventsAfter(sessionID: string, afterSeq: number, limit: number): LaneEventRecord[] {
+    const normalizedAfter = Math.max(0, Math.floor(afterSeq))
+    const normalizedLimit = Math.max(1, Math.floor(limit))
+    const db = this.db
+    if (!db) {
+      return this.fallbackLaneEvents
+        .filter((event) => event.sessionID === sessionID && event.seq > normalizedAfter)
+        .sort((left, right) => left.seq - right.seq)
+        .slice(0, normalizedLimit)
+        .map((event) => ({
+          seq: event.seq,
+          sessionID: event.sessionID,
+          messageID: event.messageID,
+          eventType: event.eventType,
+          payloadJSON: event.payloadJSON,
+          createdAt: event.createdAt,
+        }))
+    }
+
+    const rows = db
+      .prepare(
+        `SELECT seq, session_id, message_id, event_type, payload_json, created_at
+         FROM lane_events
+         WHERE session_id = ? AND seq > ?
+         ORDER BY seq ASC
+         LIMIT ?`,
+      )
+      .all(sessionID, normalizedAfter, normalizedLimit) as unknown as LaneEventRow[]
+
+    return rows.map((row) => ({
+      seq: row.seq,
+      sessionID: row.session_id,
+      messageID: row.message_id,
+      eventType: row.event_type,
+      payloadJSON: row.payload_json,
       createdAt: row.created_at,
     }))
   }
