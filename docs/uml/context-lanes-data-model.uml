@@ -5,6 +5,7 @@ hide stereotypes
 class contexts {
   +session_id: TEXT (PK part)
   +id: TEXT (PK part)
+  +owner_session_id: TEXT (nullable)
   +title: TEXT
   +summary: TEXT
   +status: TEXT(active|archived)
@@ -40,8 +41,49 @@ class context_overrides {
   +expires_at: INTEGER
 }
 
+class message_intent_buckets {
+  +session_id: TEXT (PK part)
+  +message_id: TEXT (PK part)
+  +bucket_type: TEXT (PK part)
+  +context_id: TEXT (PK part)
+  +score: REAL
+  +bucket_rank: INTEGER
+  +reason: TEXT
+  +created_at: INTEGER
+}
+
+class message_step_progression {
+  +session_id: TEXT (PK part)
+  +message_id: TEXT (PK part)
+  +step_order: INTEGER (PK part)
+  +step_type: TEXT
+  +detail_json: TEXT
+  +created_at: INTEGER
+}
+
+class context_snapshots {
+  +session_id: TEXT (PK part)
+  +message_id: TEXT (PK part)
+  +snapshot_kind: TEXT (PK part)
+  +snapshot_index: INTEGER (PK part)
+  +payload_json: TEXT
+  +created_at: INTEGER
+}
+
+class lane_events {
+  +seq: INTEGER PK AUTOINCREMENT
+  +session_id: TEXT
+  +message_id: TEXT
+  +event_type: TEXT
+  +payload_json: TEXT
+  +created_at: INTEGER
+}
+
 contexts "1" -- "many" context_memberships : context_id
 contexts "1" -- "many" context_switch_events : from/to context ids
 contexts "1" -- "0..1" context_overrides : active override
+contexts "1" -- "many" message_intent_buckets : bucket context_id
+contexts "1" -- "many" context_snapshots : snapshot lineage
+message_step_progression "many" -- "many" lane_events : replay stream alignment
 
 @enduml

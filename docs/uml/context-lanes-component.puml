@@ -3,12 +3,21 @@ skinparam componentStyle rectangle
 
 actor "User" as User
 actor "OpenCode Runtime" as Runtime
+actor "Frontend Viewer" as Viewer
 
 component "Plugin Entry\nindex.ts" as Entry
+component "Intent Classifier\n(intent buckets)" as Classifier
 component "Lane Orchestrator\nlib/context-lanes/orchestrator.ts" as Orchestrator
 component "Lane Router\nlib/context-lanes/router.ts" as Router
 component "Semantic Reranker\nlib/context-lanes/semantic.ts" as Semantic
-database "Lane Store (SQLite/fallback)\nlib/context-lanes/store.ts" as Store
+component "Session Delegation Resolver\n(reuse/create owner sessions)" as Delegation
+component "Prompt Cache Planner\n(stable context packing)" as CachePlanner
+database "Lane State Store\n(SQLite/fallback)" as Store
+database "Progression/Event Store\nintent + steps + snapshots + lane_events" as EventStore
+component "Event Bus" as EventBus
+component "Visualization Projector" as Projector
+component "Visualization Web API\nlib/context-lanes/visualization-web.ts" as VizAPI
+component "Dashboard Renderer\nlib/context-lanes/visualization.ts" as VizRenderer
 
 component "Transform Engine\nlib/transform.ts" as Transform
 component "Drift Detector\nlib/drift-embeddings.ts" as Drift
@@ -22,12 +31,23 @@ User --> Runtime : message / tool invocation
 Runtime --> Entry : chat.message + lane tools
 
 Entry --> SessionAPI : load full session history
+Entry --> Classifier : classify message into intent buckets
 Entry --> Orchestrator : route(session, message, latest text, history)
 Orchestrator --> Store : read/update lanes, memberships, switches, overrides
 Orchestrator --> Router : lexical scoring + lane selection
 Router --> Semantic : optional rerank (ambiguity gate)
 Semantic --> Embed : embedding calls
-Orchestrator --> Entry : laneHistory + lane selection
+Orchestrator --> Delegation : resolve/reuse owner session
+Delegation --> SessionAPI : create/list/prompt owner session
+Orchestrator --> Entry : laneHistory + lane selection + ownerRoutes
+
+Entry --> CachePlanner : build deterministic model context
+Entry --> EventStore : persist intent buckets + step progression + snapshots
+Entry --> EventBus : publish step events
+EventBus --> Projector : update live progression
+Projector --> VizAPI : serve snapshots + incremental events
+VizAPI --> VizRenderer : render dashboard shell
+VizAPI --> EventStore : replay by seq/session/message
 
 Entry --> Transform : computeFocusedContext(laneHistory)
 Transform --> Drift : optional drift check
@@ -37,5 +57,8 @@ Transform --> Stats : transform counters and decision
 Entry --> Stats : message/lane counters
 
 Entry --> Runtime : prepend focused context to outgoing user message
+
+Viewer --> VizAPI : inspect /, /api/snapshot, /api/events
+Viewer --> SessionAPI : open delegated owner session via ID
 
 @enduml

@@ -2,17 +2,27 @@
 actor User
 participant "OpenCode Runtime" as Runtime
 participant "Plugin Entry" as Entry
+participant "Intent Classifier" as Classifier
 participant "Lane Orchestrator" as Orch
 participant "Lane Router" as Router
 participant "Semantic Reranker" as Semantic
 database "Lane Store" as Store
+database "Progression DB" as EventStore
+participant "Event Bus" as EventBus
+participant "Projector" as Projector
+participant "Viz API" as VizAPI
 participant "Embedding Provider" as Embed
 participant "Transform" as Transform
 participant "Focused Context Bridge" as Bridge
+database "Session API" as SessionAPI
 
 User -> Runtime : sends message M
 Runtime -> Entry : chat.message(output)
 Entry -> Entry : extract latest user text
+Entry -> Classifier : classify intent buckets
+Classifier --> Entry : bucket scores/ranks
+Entry -> EventStore : persist intent assignments
+Entry -> EventBus : publish step(received/classified)
 Entry -> Orch : route(sessionID, messageID, text, history)
 
 Orch -> Store : list active lanes + latest primary
@@ -29,15 +39,26 @@ Router --> Orch : primary + secondary lane selection
 Orch -> Store : apply manual override (if active)
 
 alt no primary lane selected
-  Orch -> Store : create new lane
+  Orch -> SessionAPI : create owner session (if enabled)
+  SessionAPI --> Orch : ownerSessionID
+  Orch -> Store : create new lane + ownerSessionID
 else lane selected
   Orch -> Store : update lane summaries
+  alt selected lane has existing owner session
+    Orch -> SessionAPI : prompt owner session handoff
+  end
 end
 
 Orch -> Store : save memberships
 Orch -> Store : save switch event (if primary changed)
 Orch -> Store : read memberships for lane history reconstruction
 Orch --> Entry : laneHistory + selection
+Entry -> EventStore : persist step(route-selected/history-built)
+Entry -> EventBus : publish route progression
+
+Entry -> Entry : build stable context prefix (cache-friendly ordering)
+Entry -> EventStore : persist model-input snapshot
+Entry -> EventBus : publish context-prepared
 
 Entry -> Transform : computeFocusedContext(laneHistory)
 alt compacted
@@ -45,9 +66,13 @@ alt compacted
   Bridge --> Transform : focused_context
   Transform --> Entry : compacted=true
   Entry --> Runtime : prepend [RLM_FOCUSED_CONTEXT]
+  Entry -> EventStore : persist step(compacted/response-mutated)
+  Entry -> EventBus : publish compaction step
 else no-op
   Transform --> Entry : compacted=false
 end
+
+Projector -> VizAPI : serve /api/snapshot + /api/events?afterSeq
 
 Runtime --> User : assistant response
 @enduml

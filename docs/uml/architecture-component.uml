@@ -1,17 +1,36 @@
 @startuml
+!pragma layout smetana
+skinparam dpi 150
+
+skinparam shadowing false
+skinparam linetype ortho
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 13
+skinparam padding 10
+skinparam wrapWidth 150
 skinparam componentStyle rectangle
 
 actor "User" as User
 actor "OpenCode Runtime" as Runtime
+actor "Frontend Viewer" as Viewer
 
 component "Plugin Entry\nindex.ts" as Entry
 component "Config Loader\nlib/config.ts" as Config
 component "Runtime Stats\nlib/runtime-stats.ts" as Stats
+component "Intent Classifier\n(intent buckets)" as Classifier
 
 component "Lane Orchestrator\nlib/context-lanes/orchestrator.ts" as Orchestrator
 component "Lane Router\nlib/context-lanes/router.ts" as Router
 component "Lane Semantic Rerank\nlib/context-lanes/semantic.ts" as LaneSemantic
-database "Lane Store (SQLite/fallback)\nlib/context-lanes/store.ts" as LaneStore
+component "Session Delegation Resolver\n(reuse/create owner session)" as Delegation
+component "Prompt Cache Planner\n(canonical context packing)" as CachePlanner
+database "Lane State DB\ncontexts + memberships + switches + overrides" as LaneStore
+database "Progression DB\nintent buckets + step progression + context snapshots + lane_events" as EventStore
+
+component "Event Bus\n(publish/subscribe)" as EventBus
+component "Visualization Projector\n(snapshot + stream cache)" as Projector
+component "Visualization Web API\nlib/context-lanes/visualization-web.ts" as VizAPI
+component "Dashboard Renderer\nlib/context-lanes/visualization.ts" as VizRenderer
 
 component "Transform Engine\nlib/transform.ts" as Transform
 component "Token Estimator\nlib/token-estimator.ts" as Estimator
@@ -25,6 +44,7 @@ component "Official RLM Library\nfrom rlm import RLM" as RLM
 component "Embedding Provider\nOllama /api/embed" as Embed
 cloud "Model Backend" as Backend
 database "OpenCode Session API" as SessionAPI
+component "OpenCode CLI\nopencode -s <sessionID>" as OpenCodeCLI
 
 User --> Runtime : sends message / runs tools
 Runtime --> Entry : chat.message + tool hooks
@@ -32,12 +52,25 @@ Entry --> Config : getConfig()
 Entry --> Stats : update counters
 Entry --> SessionAPI : session.messages(sessionID)
 
+Entry --> Classifier : classify intent bucket(s)
 Entry --> Orchestrator : route(...) (if lanes enabled)
 Orchestrator --> Router : score contexts
 Router --> LaneSemantic : rerank candidates (if ambiguous)
 LaneSemantic --> Embed : embedding calls
+Orchestrator --> Delegation : resolve owner session link
+Delegation --> SessionAPI : find/create reusable session
+Delegation --> Orchestrator : ownerSessionID + delegation mode
 Orchestrator --> LaneStore : list/update lanes, memberships, switches
-Orchestrator --> Entry : laneHistory + selection
+Orchestrator --> Entry : laneHistory + selection + ownerRoutes
+
+Entry --> CachePlanner : build stable model context prefix
+CachePlanner --> EventStore : persist context snapshots + cache metadata
+Entry --> EventStore : append intent buckets + step progression + lane_events
+Entry --> EventBus : publish incremental events
+EventBus --> Projector : update stream tail
+Projector --> VizAPI : serve snapshot + incremental events
+VizAPI --> VizRenderer : render HTML shell + payload bootstrap
+VizAPI --> EventStore : replay by seq/message/session
 
 Entry --> Transform : computeFocusedContext(historyForTransform, config)
 Transform --> Estimator : estimateConversationTokens(...)
@@ -56,6 +89,10 @@ RLM --> Backend : recursive completion
 OCBridge --> Transform : focusedContext
 PyBridge --> Transform : focusedContext
 Transform --> Entry : TransformRun
+Entry --> SessionAPI : optional delegation prompt to owner session
 Entry --> Runtime : prepend [RLM_FOCUSED_CONTEXT]
+
+Viewer --> VizAPI : open /, /api/snapshot, /api/events
+Viewer --> OpenCodeCLI : open delegated session
 
 @enduml

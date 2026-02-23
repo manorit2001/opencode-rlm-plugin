@@ -1,16 +1,30 @@
 @startuml
+skinparam shadowing false
+skinparam defaultFontName "DejaVu Sans"
+skinparam defaultFontSize 13
+skinparam padding 8
+skinparam dpi 130
+skinparam wrapWidth 220
+skinparam maxMessageSize 140
+skinparam ParticipantPadding 12
+skinparam BoxPadding 10
 actor User
-participant "OpenCode Runtime" as Runtime
-participant "Plugin (index.ts)" as Plugin
+participant "Runtime" as Runtime
+participant "Plugin" as Plugin
 database "Session API" as Session
-participant "Lane Orchestrator" as Orchestrator
+participant "Intent Classifier" as Classifier
+participant "Orchestrator" as Orchestrator
 database "Lane Store" as LaneStore
+database "Progression DB" as EventStore
+participant "Event Bus" as EventBus
+participant "Projector" as Projector
+participant "Viz API" as VizAPI
 participant "Transform" as Transform
-participant "Drift Detector" as Drift
-participant "Embedding Provider" as Embed
-participant "OpenCode Bridge" as OCBridge
-participant "Python Bridge" as PyBridge
-participant "Model Backend" as Backend
+participant "Drift" as Drift
+participant "Embeddings" as Embed
+participant "OC Bridge" as OCBridge
+participant "Py Bridge" as PyBridge
+participant "Model" as Backend
 
 User -> Runtime : sends message
 Runtime -> Plugin : chat.message(output)
@@ -18,20 +32,40 @@ Runtime -> Plugin : chat.message(output)
 Plugin -> Plugin : skip if internal focused-context prompt
 Plugin -> Session : messages(sessionID)
 Session --> Plugin : history
+Plugin -> Classifier : classifyIntentBuckets(sessionID, messageID, text, history)
+Classifier --> Plugin : intent buckets + scores
+Plugin -> EventStore : save intent buckets + stage(received/classified)
+Plugin -> EventBus : publish stage events
+EventBus -> Projector : update live progression
 
 alt lanes enabled and latest user text exists
   Plugin -> Orchestrator : route(sessionID, messageID, text, history)
   Orchestrator -> LaneStore : list active lanes + latest primary
   Orchestrator -> Orchestrator : lexical scoring
   alt lexical routing ambiguous and semantic enabled
-    Orchestrator -> Embed : semantic embeddings (top candidates)
+    Orchestrator -> Embed : semantic embeddings
     Embed --> Orchestrator : similarities
   end
-  Orchestrator -> LaneStore : save memberships/switch events
-  Orchestrator --> Plugin : laneHistory
+  Orchestrator -> LaneStore : save memberships + switches
+  Orchestrator --> Plugin : laneHistory + ownerRoutes
+  Plugin -> EventStore : save stage(route-selected + lane-history-built)
+  Plugin -> EventBus : publish route events
+
+  alt owner session exists for primary lane
+    Plugin -> Session : prompt(ownerSessionID, delegation handoff)
+    Plugin -> EventStore : save stage(delegated-existing-owner-session)
+  else no owner session available
+    Plugin -> Session : create child session (if session buckets enabled)
+    Session --> Plugin : ownerSessionID
+    Plugin -> EventStore : save stage(created-owner-session)
+  end
 else lanes disabled
   Plugin -> Plugin : use full history
 end
+
+Plugin -> Plugin : build cache-stable context prefix (deterministic ordering)
+Plugin -> EventStore : save context snapshot(model-input)
+Plugin -> EventBus : publish context-prepared event
 
 Plugin -> Transform : computeFocusedContext(historyForTransform, config)
 Transform -> Transform : estimate pressure + build archive/recent
@@ -49,7 +83,7 @@ alt no pressure trigger and no drift trigger
 else focused context needed
   alt backend = opencode
     Transform -> OCBridge : generateFocusedContextWithOpenCodeAuth(...)
-    OCBridge -> Session : create temp child session + prompt
+    OCBridge -> Session : create temp session + prompt
     Session -> Backend : model call
     Backend --> Session : response
     OCBridge -> Session : delete temp session
@@ -63,8 +97,12 @@ else focused context needed
 
   Transform --> Plugin : compacted=true + focusedContext
   Plugin -> Plugin : prepend [RLM_FOCUSED_CONTEXT]
+  Plugin -> EventStore : save stage(compacted + response-mutated)
+  Plugin -> EventBus : publish compaction event
   Plugin --> Runtime : modified user message parts
 end
+
+Projector -> VizAPI : serve /api/snapshot + /api/events?afterSeq
 
 Runtime --> User : assistant response uses focused context
 @enduml

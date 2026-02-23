@@ -4,6 +4,9 @@ participant "Runtime" as Runtime
 participant "Plugin Tools" as Tools
 participant "Lane Orchestrator" as Orch
 database "Lane Store" as Store
+participant "Visualization API" as VizAPI
+database "Progression DB" as EventStore
+participant "OpenCode Session API" as SessionAPI
 
 User -> Runtime : contexts
 Runtime -> Tools : execute `contexts`
@@ -22,4 +25,21 @@ Runtime -> Tools : execute tool
 Tools -> Orch : list events or clear override
 Orch -> Store : query/update override/events
 Tools --> Runtime : formatted response
+
+User -> Runtime : contexts-visualize [sessionID host port basePath]
+Runtime -> Tools : execute `contexts-visualize`
+Tools -> VizAPI : start/reuse visualization server
+VizAPI -> Store : read snapshot source rows
+VizAPI -> EventStore : read progression/events (incremental)
+Tools --> Runtime : frontend URL + /api/snapshot + /api/events + /health
+
+User -> Runtime : open delegated owner lane in OpenCode
+Runtime -> Tools : inspect current primary lane ownerSessionID
+Tools -> SessionAPI : list/reuse/create delegation target session
+Tools --> Runtime : delegation hint `opencode -s <sessionID>`
+
+User -> Runtime : contexts-visualize-stop
+Runtime -> Tools : execute `contexts-visualize-stop`
+Tools -> VizAPI : close server
+Tools --> Runtime : stop confirmation
 @enduml
