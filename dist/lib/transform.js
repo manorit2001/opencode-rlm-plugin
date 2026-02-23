@@ -53,10 +53,58 @@ function isFocusedContextMessage(message) {
         return typeof text === "string" && text.startsWith(FOCUSED_CONTEXT_TAG);
     });
 }
+function extractCompactedVector(message) {
+    const parts = Array.isArray(message.parts) ? message.parts : [];
+    for (const part of parts) {
+        if (!part || typeof part !== "object") {
+            continue;
+        }
+        const text = part.text;
+        if (typeof text !== "string" || !text.startsWith(FOCUSED_CONTEXT_TAG)) {
+            continue;
+        }
+        const normalized = text
+            .slice(FOCUSED_CONTEXT_TAG.length)
+            .trimStart()
+            .trim();
+        if (normalized.length === 0) {
+            return null;
+        }
+        if (!normalized.includes("\n\n")) {
+            return null;
+        }
+        return normalized;
+    }
+    return null;
+}
 function buildArchiveContext(messages, maxArchiveChars) {
+    let compactedVector = null;
+    let startIndex = 0;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const vector = extractCompactedVector(messages[index]);
+        if (vector) {
+            compactedVector = vector;
+            startIndex = index + 1;
+            break;
+        }
+    }
     let remaining = maxArchiveChars;
-    const chunks = [];
-    for (let index = messages.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const historicalChunks = [];
+    let vectorChunk = null;
+    if (compactedVector) {
+        const serializedVector = `[assistant]\n${compactedVector}`;
+        const boundedVector = serializedVector.length > remaining
+            ? serializedVector.slice(serializedVector.length - remaining)
+            : serializedVector;
+        if (boundedVector.length > 0) {
+            vectorChunk = boundedVector;
+            remaining -= boundedVector.length;
+        }
+    }
+    if (remaining <= 0) {
+        return vectorChunk ?? "";
+    }
+    for (let index = messages.length - 1; index >= startIndex && remaining > 0; index -= 1) {
         const message = messages[index];
         if (isFocusedContextMessage(message)) {
             continue;
@@ -66,11 +114,14 @@ function buildArchiveContext(messages, maxArchiveChars) {
             continue;
         }
         const bounded = serialized.length > remaining ? serialized.slice(serialized.length - remaining) : serialized;
-        chunks.push(bounded);
+        historicalChunks.push(bounded);
         remaining -= bounded.length;
     }
-    chunks.reverse();
-    return chunks.join("\n\n");
+    historicalChunks.reverse();
+    if (vectorChunk) {
+        return [vectorChunk, ...historicalChunks].join("\n\n");
+    }
+    return historicalChunks.join("\n\n");
 }
 function latestUserGoal(messages) {
     for (let index = messages.length - 1; index >= 0; index -= 1) {

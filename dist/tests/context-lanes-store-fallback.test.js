@@ -25,6 +25,7 @@ test("ContextLaneStore works with in-memory fallback when node:sqlite is disable
         const store = new ContextLaneStore(dir, "lane-state.sqlite");
         const now = Date.now();
         const created = store.createContext("session-fallback", "Fallback Lane", "Initial fallback summary", now);
+        store.createContext("session-alt", "Other Lane", "Alternative lane summary", now + 500);
         assert.equal(store.countActiveContexts("session-fallback"), 1);
         store.updateContextSummary("session-fallback", created.id, "Updated fallback summary", now + 1_000);
         const loaded = store.getContext("session-fallback", created.id);
@@ -40,13 +41,46 @@ test("ContextLaneStore works with in-memory fallback when node:sqlite is disable
         assert.equal(store.latestPrimaryContextID("session-fallback"), created.id);
         const membershipMap = store.getMembershipContextMap("session-fallback", ["msg-1"]);
         assert.equal(membershipMap.get("msg-1")?.has(created.id), true);
+        const membershipEvents = store.listMembershipEvents("session-fallback", 10);
+        assert.equal(membershipEvents.length, 1);
+        assert.equal(membershipEvents[0]?.messageID, "msg-1");
+        assert.equal(membershipEvents[0]?.contextID, created.id);
+        assert.equal(membershipEvents[0]?.isPrimary, true);
         store.recordSwitch("session-fallback", "msg-1", null, created.id, 0.9, "created-new-context", now + 3_000);
         const switches = store.listSwitchEvents("session-fallback", 10);
         assert.equal(switches.length, 1);
         assert.equal(switches[0]?.toContextID, created.id);
+        const sessions = store.listSessions(10);
+        assert.equal(sessions.length, 2);
+        assert.equal(sessions[0]?.sessionID, "session-fallback");
+        assert.equal(sessions[1]?.sessionID, "session-alt");
         store.setManualOverride("session-fallback", created.id, now + 10_000);
         assert.equal(store.getManualOverride("session-fallback", now + 5_000), created.id);
         assert.equal(store.getManualOverride("session-fallback", now + 20_000), null);
+        store.saveIntentBucketAssignments("session-fallback", "msg-1", [
+            {
+                bucketType: "primary",
+                contextID: created.id,
+                score: 0.91,
+                bucketRank: 0,
+                reason: "selected-primary",
+            },
+        ], now + 4_000);
+        const intents = store.listIntentBucketAssignments("session-fallback", "msg-1", 10);
+        assert.equal(intents.length, 1);
+        assert.equal(intents[0]?.contextID, created.id);
+        store.appendProgressionStep("session-fallback", "msg-1", "routing.completed", JSON.stringify({ primaryContextID: created.id }), now + 4_500);
+        const steps = store.listProgressionSteps("session-fallback", "msg-1", 10);
+        assert.equal(steps.length, 1);
+        assert.equal(steps[0]?.stepType, "routing.completed");
+        store.saveContextSnapshot("session-fallback", "msg-1", "model-input", 0, JSON.stringify({ historyMessages: 3 }), now + 5_000);
+        const snapshots = store.listContextSnapshots("session-fallback", "msg-1", null, 10);
+        assert.equal(snapshots.length, 1);
+        assert.equal(snapshots[0]?.snapshotKind, "model-input");
+        store.appendLaneEvent("session-fallback", "msg-1", "context.prepared", JSON.stringify({ historyMessages: 3 }), now + 5_500);
+        const events = store.listLaneEventsAfter("session-fallback", 0, 10);
+        assert.equal(events.length, 1);
+        assert.equal(events[0]?.eventType, "context.prepared");
     }
     finally {
         if (previousDisableNode === undefined) {
@@ -72,13 +106,51 @@ test("ContextLaneStore persists data when sqlite backend is available", { skip: 
     try {
         const store = new ContextLaneStore(dir, "lane-state.sqlite");
         const now = Date.now();
-        const created = store.createContext("session-sqlite", "SQLite Lane", "Persisted summary", now);
+        const created = store.createContext("session-sqlite", "SQLite Lane", "Persisted summary", now, "child-session-sqlite", "child-session-sqlite");
+        store.saveMemberships("session-sqlite", "msg-sqlite", [
+            {
+                contextID: created.id,
+                relevance: 0.88,
+                isPrimary: true,
+            },
+        ], now + 1_000);
         assert.equal(store.countActiveContexts("session-sqlite"), 1);
         const reopened = new ContextLaneStore(dir, "lane-state.sqlite");
         assert.equal(reopened.countActiveContexts("session-sqlite"), 1);
         const loaded = reopened.getContext("session-sqlite", created.id);
         assert.ok(loaded);
         assert.equal(loaded.summary, "Persisted summary");
+        assert.equal(loaded.ownerSessionID, "child-session-sqlite");
+        const sessions = reopened.listSessions(10);
+        assert.equal(sessions[0]?.sessionID, "session-sqlite");
+        const membershipEvents = reopened.listMembershipEvents("session-sqlite", 10);
+        assert.equal(membershipEvents.length, 1);
+        assert.equal(membershipEvents[0]?.messageID, "msg-sqlite");
+        assert.equal(membershipEvents[0]?.contextID, created.id);
+        reopened.saveIntentBucketAssignments("session-sqlite", "msg-sqlite", [
+            {
+                bucketType: "primary",
+                contextID: created.id,
+                score: 0.88,
+                bucketRank: 0,
+                reason: "selected-primary",
+            },
+        ], now + 2_000);
+        reopened.appendProgressionStep("session-sqlite", "msg-sqlite", "routing.completed", JSON.stringify({ primaryContextID: created.id }), now + 2_500);
+        reopened.saveContextSnapshot("session-sqlite", "msg-sqlite", "model-input", 0, JSON.stringify({ historyMessages: 2 }), now + 3_000);
+        reopened.appendLaneEvent("session-sqlite", "msg-sqlite", "context.prepared", JSON.stringify({ historyMessages: 2 }), now + 3_500);
+        const intents = reopened.listIntentBucketAssignments("session-sqlite", "msg-sqlite", 10);
+        assert.equal(intents.length, 1);
+        assert.equal(intents[0]?.bucketType, "primary");
+        const steps = reopened.listProgressionSteps("session-sqlite", "msg-sqlite", 10);
+        assert.equal(steps.length, 1);
+        assert.equal(steps[0]?.stepOrder, 1);
+        const snapshots = reopened.listContextSnapshots("session-sqlite", "msg-sqlite", null, 10);
+        assert.equal(snapshots.length, 1);
+        assert.equal(snapshots[0]?.snapshotKind, "model-input");
+        const events = reopened.listLaneEventsAfter("session-sqlite", 0, 10);
+        assert.equal(events.length, 1);
+        assert.equal(events[0]?.eventType, "context.prepared");
     }
     finally {
         rmSync(dir, { recursive: true, force: true });

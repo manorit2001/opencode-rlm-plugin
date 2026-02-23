@@ -43,7 +43,18 @@ export interface RecursiveConfig {
     laneSemanticWeight: number;
     laneSemanticAmbiguityTopScore: number;
     laneSemanticAmbiguityGap: number;
+    laneMinHistoryTokenRatio?: number;
+    laneVisualizationSessionLimit?: number;
+    laneVisualizationContextLimit?: number;
+    laneVisualizationSwitchLimit?: number;
+    laneVisualizationMembershipLimit?: number;
+    laneVisualizationOutputPath?: string;
+    laneVisualizationWebHost?: string;
+    laneVisualizationWebPort?: number;
+    laneVisualizationWebBasePath?: string;
     laneDbPath: string;
+    laneBucketsUseSessions?: boolean;
+    laneSessionTitlePrefix?: string;
     keepRecentMessages: number;
     maxArchiveChars: number;
     maxFocusedContextChars: number;

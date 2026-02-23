@@ -5,8 +5,11 @@ import { estimateConversationTokens } from "./lib/token-estimator.js";
 import { INTERNAL_FOCUSED_CONTEXT_PROMPT_TAG, generateFocusedContextWithOpenCodeAuth, } from "./lib/opencode-bridge.js";
 import { ContextLaneOrchestrator } from "./lib/context-lanes/orchestrator.js";
 import { ContextLaneStore } from "./lib/context-lanes/store.js";
-import { createSessionRuntimeStats, formatRuntimeStats, formatTokenEfficiencyStats, } from "./lib/runtime-stats.js";
+import { createSessionRuntimeStats, formatRuntimeStats, formatTokenEfficiencyStats, recordLaneTelemetry, } from "./lib/runtime-stats.js";
+import { buildLaneVisualizationSnapshot } from "./lib/context-lanes/visualization.js";
+import { startLaneVisualizationWebServer, } from "./lib/context-lanes/visualization-web.js";
 const FOCUSED_CONTEXT_TAG = "[RLM_FOCUSED_CONTEXT]";
+const INTERNAL_CONTEXT_HANDOFF_TAG = "[RLM_INTERNAL_CONTEXT_HANDOFF]";
 function statsForSession(statsBySession, sessionID, now) {
     const existing = statsBySession.get(sessionID);
     if (existing) {
@@ -15,6 +18,27 @@ function statsForSession(statsBySession, sessionID, now) {
     const created = createSessionRuntimeStats(now);
     statsBySession.set(sessionID, created);
     return created;
+}
+function unwrapData(response) {
+    if (!response || typeof response !== "object") {
+        return response;
+    }
+    const record = response;
+    if (Object.hasOwn(record, "data")) {
+        return record.data;
+    }
+    return response;
+}
+function normalizeLaneSessionTitle(prefix, laneTitle) {
+    const cleanPrefix = (prefix ?? "Project").trim();
+    const cleanTitle = laneTitle.trim();
+    if (cleanPrefix.length === 0) {
+        return cleanTitle;
+    }
+    if (cleanTitle.length === 0) {
+        return cleanPrefix;
+    }
+    return `${cleanPrefix}: ${cleanTitle}`;
 }
 function normalizeMessage(entry) {
     if (!entry || typeof entry !== "object") {
@@ -68,7 +92,7 @@ function prependFocusedContext(parts, focusedContext) {
         }
     }
 }
-function isInternalFocusedContextPrompt(parts) {
+function isInternalPluginPrompt(parts) {
     for (const part of parts) {
         if (!part || typeof part !== "object") {
             continue;
@@ -77,11 +101,26 @@ function isInternalFocusedContextPrompt(parts) {
         if (record.type !== "text" || typeof record.text !== "string") {
             continue;
         }
-        if (record.text.startsWith(INTERNAL_FOCUSED_CONTEXT_PROMPT_TAG)) {
+        if (record.text.startsWith(INTERNAL_FOCUSED_CONTEXT_PROMPT_TAG) ||
+            record.text.startsWith(INTERNAL_CONTEXT_HANDOFF_TAG)) {
             return true;
         }
     }
     return false;
+}
+function buildOwnerHandoffPrompt(rootSessionID, latestUserText, route) {
+    const role = route.isPrimary ? "primary" : "secondary";
+    return [
+        INTERNAL_CONTEXT_HANDOFF_TAG,
+        "This is an internal lane handoff message.",
+        `Root session: ${rootSessionID}`,
+        `Lane role: ${role}`,
+        `Lane context ID: ${route.contextID}`,
+        `Lane title: ${route.contextTitle}`,
+        "Latest user message:",
+        latestUserText,
+        "Continue this subtask in this session with concrete next actions.",
+    ].join("\n");
 }
 function textFromParts(parts) {
     const chunks = [];
@@ -123,7 +162,8 @@ function formatContextsOutput(laneOrchestrator, sessionID, laneMaxActive) {
     for (const context of contexts) {
         const marker = context.id === primaryContextID ? "*" : "-";
         const summary = context.summary.replace(/\s+/g, " ").slice(0, 120);
-        lines.push(`${marker} ${context.id} | ${context.title} | msgs=${context.msgCount} | last=${context.lastActiveAt} | ${summary}`);
+        const owner = context.ownerSessionID ?? "none";
+        lines.push(`${marker} ${context.id} | ${context.title} | owner=${owner} | msgs=${context.msgCount} | last=${context.lastActiveAt} | ${summary}`);
     }
     return lines.join("\n");
 }
@@ -139,11 +179,93 @@ function formatSwitchEventsOutput(laneOrchestrator, sessionID, limit) {
     })
         .join("\n");
 }
+function stringifyDetail(value) {
+    try {
+        return JSON.stringify(value);
+    }
+    catch {
+        return JSON.stringify({ error: "non-serializable-detail" });
+    }
+}
+function historySnapshotPayload(history) {
+    return history.map((message) => ({
+        id: message.id ?? "",
+        role: message.role ?? "unknown",
+        text: textFromParts(message.parts ?? []),
+    }));
+}
+function delegationHintForSession(laneOrchestrator, sessionID) {
+    const primaryContextID = laneOrchestrator.currentPrimaryContextID(sessionID);
+    if (!primaryContextID) {
+        return null;
+    }
+    const contexts = laneOrchestrator.listContexts(sessionID, 64);
+    const primary = contexts.find((context) => context.id === primaryContextID);
+    const ownerSessionID = primary?.ownerSessionID?.trim() ?? "";
+    if (ownerSessionID.length === 0) {
+        return null;
+    }
+    return `Delegation target: ${ownerSessionID} (open with: opencode -s ${ownerSessionID})`;
+}
 const plugin = (async (ctx) => {
     const config = getConfig();
     const laneStore = new ContextLaneStore(ctx.directory, config.laneDbPath);
-    const laneOrchestrator = new ContextLaneOrchestrator(laneStore);
+    const laneOrchestrator = new ContextLaneOrchestrator(laneStore, fetch, config.laneBucketsUseSessions
+        ? async ({ rootSessionID, laneTitle }) => {
+            const title = normalizeLaneSessionTitle(config.laneSessionTitlePrefix, laneTitle);
+            const createdRaw = await ctx.client.session.create({
+                body: {
+                    parentID: rootSessionID,
+                    title,
+                },
+            });
+            const created = unwrapData(createdRaw);
+            if (!created || typeof created !== "object") {
+                return { laneTitle: title };
+            }
+            const sessionID = created.id;
+            if (typeof sessionID !== "string" || sessionID.trim().length === 0) {
+                return { laneTitle: title };
+            }
+            return {
+                contextID: sessionID,
+                laneTitle: title,
+            };
+        }
+        : undefined);
     const statsBySession = new Map();
+    let laneVisualizationWeb = null;
+    let laneVisualizationWebSignature = "";
+    const notifyOwnerSessions = async (rootSessionID, latestUserText, ownerRoutes) => {
+        if (latestUserText.trim().length === 0 || ownerRoutes.length === 0) {
+            return;
+        }
+        const seenOwners = new Set();
+        for (const route of ownerRoutes) {
+            if (route.ownerSessionID === rootSessionID || seenOwners.has(route.ownerSessionID)) {
+                continue;
+            }
+            seenOwners.add(route.ownerSessionID);
+            try {
+                await ctx.client.session.prompt({
+                    path: { id: route.ownerSessionID },
+                    body: {
+                        parts: [
+                            {
+                                type: "text",
+                                text: buildOwnerHandoffPrompt(rootSessionID, latestUserText, route),
+                            },
+                        ],
+                    },
+                });
+            }
+            catch (error) {
+                if (process.env.RLM_PLUGIN_DEBUG === "1") {
+                    console.error(`RLM plugin failed to notify owner session ${route.ownerSessionID}`, error);
+                }
+            }
+        }
+    };
     return {
         tool: {
             contexts: tool({
@@ -217,6 +339,103 @@ const plugin = (async (ctx) => {
                     });
                 },
             }),
+            "contexts-visualize": tool({
+                description: "Start a web frontend that visualizes lane formation from lane sqlite data",
+                args: {
+                    sessionID: tool.schema.string().min(1).optional(),
+                    host: tool.schema.string().optional(),
+                    port: tool.schema.number().int().positive().optional(),
+                    basePath: tool.schema.string().optional(),
+                    sessionLimit: tool.schema.number().int().positive().optional(),
+                    contextLimit: tool.schema.number().int().positive().optional(),
+                    switchLimit: tool.schema.number().int().positive().optional(),
+                    membershipLimit: tool.schema.number().int().positive().optional(),
+                },
+                execute: async (args, tctx) => {
+                    const defaults = {
+                        sessionID: (args.sessionID ?? tctx.sessionID).trim(),
+                        sessionLimit: args.sessionLimit ?? config.laneVisualizationSessionLimit ?? 8,
+                        contextLimit: args.contextLimit ?? config.laneVisualizationContextLimit ?? 16,
+                        switchLimit: args.switchLimit ?? config.laneVisualizationSwitchLimit ?? 60,
+                        membershipLimit: args.membershipLimit ?? config.laneVisualizationMembershipLimit ?? 240,
+                    };
+                    const host = (args.host ?? config.laneVisualizationWebHost ?? "127.0.0.1").trim() || "127.0.0.1";
+                    const port = args.port ?? config.laneVisualizationWebPort ?? 3799;
+                    const basePath = (args.basePath ?? config.laneVisualizationWebBasePath ?? "/").trim() || "/";
+                    const signature = JSON.stringify({ host, port, basePath, defaults });
+                    if (laneVisualizationWeb && laneVisualizationWebSignature === signature) {
+                        const apiURL = `${laneVisualizationWeb.url}/api/snapshot`;
+                        const eventsURL = `${laneVisualizationWeb.url}/api/events`;
+                        const messageURL = `${laneVisualizationWeb.url}/api/message`;
+                        const healthURL = `${laneVisualizationWeb.url}/health`;
+                        const delegationHint = delegationHintForSession(laneOrchestrator, defaults.sessionID);
+                        return [
+                            `Lane visualization web frontend already running at ${laneVisualizationWeb.url}`,
+                            `Snapshot API: ${apiURL}`,
+                            `Events API: ${eventsURL}`,
+                            `Message Debug API: ${messageURL}`,
+                            `Health check: ${healthURL}`,
+                            `Default session: ${defaults.sessionID || "none"}`,
+                            ...(delegationHint ? [delegationHint] : []),
+                            "Query params: sessionID, sessionLimit, contextLimit, switchLimit, membershipLimit",
+                        ].join("\n");
+                    }
+                    if (laneVisualizationWeb) {
+                        await laneVisualizationWeb.close();
+                        laneVisualizationWeb = null;
+                        laneVisualizationWebSignature = "";
+                    }
+                    laneVisualizationWeb = await startLaneVisualizationWebServer({
+                        host,
+                        port,
+                        basePath,
+                        defaults,
+                        buildSnapshot: (options) => buildLaneVisualizationSnapshot(laneStore, laneOrchestrator, {
+                            sessionID: options.sessionID ?? defaults.sessionID,
+                            sessionLimit: options.sessionLimit ?? defaults.sessionLimit,
+                            contextLimit: options.contextLimit ?? defaults.contextLimit,
+                            switchLimit: options.switchLimit ?? defaults.switchLimit,
+                            membershipLimit: options.membershipLimit ?? defaults.membershipLimit,
+                        }),
+                        listEventsAfter: (sessionID, afterSeq, limit) => laneStore.listLaneEventsAfter(sessionID, afterSeq, limit),
+                        getMessageDebug: (sessionID, messageID, limit) => ({
+                            intentBuckets: laneStore.listIntentBucketAssignments(sessionID, messageID, limit),
+                            progression: laneStore.listProgressionSteps(sessionID, messageID, limit),
+                            snapshots: laneStore.listContextSnapshots(sessionID, messageID, null, limit),
+                        }),
+                    });
+                    laneVisualizationWebSignature = signature;
+                    const apiURL = `${laneVisualizationWeb.url}/api/snapshot`;
+                    const eventsURL = `${laneVisualizationWeb.url}/api/events`;
+                    const messageURL = `${laneVisualizationWeb.url}/api/message`;
+                    const healthURL = `${laneVisualizationWeb.url}/health`;
+                    const delegationHint = delegationHintForSession(laneOrchestrator, defaults.sessionID);
+                    return [
+                        `Lane visualization web frontend started at ${laneVisualizationWeb.url}`,
+                        `Snapshot API: ${apiURL}`,
+                        `Events API: ${eventsURL}`,
+                        `Message Debug API: ${messageURL}`,
+                        `Health check: ${healthURL}`,
+                        `Default session: ${defaults.sessionID || "none"}`,
+                        ...(delegationHint ? [delegationHint] : []),
+                        "Query params: sessionID, sessionLimit, contextLimit, switchLimit, membershipLimit",
+                    ].join("\n");
+                },
+            }),
+            "contexts-visualize-stop": tool({
+                description: "Stop the lane visualization web frontend server",
+                args: {},
+                execute: async () => {
+                    if (!laneVisualizationWeb) {
+                        return "Lane visualization web frontend is not running.";
+                    }
+                    const url = laneVisualizationWeb.url;
+                    await laneVisualizationWeb.close();
+                    laneVisualizationWeb = null;
+                    laneVisualizationWebSignature = "";
+                    return `Lane visualization web frontend stopped: ${url}`;
+                },
+            }),
         },
         "chat.message": async (_input, output) => {
             if (!config.enabled) {
@@ -224,12 +443,28 @@ const plugin = (async (ctx) => {
             }
             const sessionID = output.message.sessionID;
             const now = Date.now();
+            const messageID = output.message.id ?? `message-${now}`;
             const sessionStats = statsForSession(statsBySession, sessionID, now);
             sessionStats.messagesSeen += 1;
             sessionStats.lastSeenAt = now;
+            const recordProgress = (stepType, detail) => {
+                try {
+                    const at = Date.now();
+                    const detailJSON = stringifyDetail(detail);
+                    laneStore.appendProgressionStep(sessionID, messageID, stepType, detailJSON, at);
+                    laneStore.appendLaneEvent(sessionID, messageID, stepType, detailJSON, at);
+                }
+                catch (error) {
+                    if (process.env.RLM_PLUGIN_DEBUG === "1") {
+                        console.error("RLM plugin failed to persist progression event", error);
+                    }
+                }
+            };
             const parts = output.parts;
-            if (isInternalFocusedContextPrompt(parts)) {
+            recordProgress("message.received", { partCount: parts.length });
+            if (isInternalPluginPrompt(parts)) {
                 sessionStats.lastDecision = "skipped-internal-focused-context-prompt";
+                recordProgress("message.skipped.internal-prompt", { reason: "internal-focused-context-prompt" });
                 return;
             }
             let historyResponse;
@@ -241,6 +476,7 @@ const plugin = (async (ctx) => {
             catch (error) {
                 sessionStats.historyFetchFailures += 1;
                 sessionStats.lastDecision = "skipped-history-fetch-failed";
+                recordProgress("message.skipped.history-fetch-failed", { reason: "history-fetch-failed" });
                 if (process.env.RLM_PLUGIN_DEBUG === "1") {
                     console.error("RLM plugin failed to read session history", error);
                 }
@@ -249,39 +485,104 @@ const plugin = (async (ctx) => {
             const history = normalizeMessages(historyResponse);
             if (history.length === 0) {
                 sessionStats.lastDecision = "skipped-empty-history";
+                recordProgress("message.skipped.empty-history", { reason: "empty-history" });
                 return;
             }
+            recordProgress("history.loaded", { messages: history.length });
             const baselineTokenEstimate = estimateConversationTokens(history);
             sessionStats.lastBaselineTokenEstimate = baselineTokenEstimate;
             const latestUserText = textFromParts(parts) || latestUserTextFromHistory(history);
             let historyForTransform = history;
+            let ownerRoutes = [];
+            let routedPrimaryContextID = null;
+            let laneTokenEstimate = null;
             if (config.laneRoutingEnabled && latestUserText.length > 0) {
                 sessionStats.laneRoutingRuns += 1;
                 const routed = await laneOrchestrator.route({
                     sessionID,
-                    messageID: output.message.id,
+                    messageID,
                     latestUserText,
                     history,
                     config,
                     now,
                 });
                 historyForTransform = routed.laneHistory;
+                ownerRoutes = routed.ownerRoutes;
+                routedPrimaryContextID = routed.selection.primaryContextID;
                 if (routed.selection.createdNewContext) {
                     sessionStats.laneNewContextCount += 1;
                 }
+                const sortedScores = routed.selection.scores
+                    .map((entry) => ({ contextID: entry.contextID, score: entry.score }))
+                    .sort((left, right) => {
+                    if (right.score !== left.score) {
+                        return right.score - left.score;
+                    }
+                    return left.contextID.localeCompare(right.contextID);
+                });
+                laneStore.saveIntentBucketAssignments(sessionID, messageID, sortedScores.map((entry, index) => ({
+                    bucketType: index === 0 ? "primary" : "secondary",
+                    contextID: entry.contextID,
+                    score: entry.score,
+                    bucketRank: index,
+                    reason: entry.contextID === routed.selection.primaryContextID ? "selected-primary" : "selected-secondary",
+                })), now);
                 if (process.env.RLM_PLUGIN_DEBUG === "1") {
                     const secondaries = routed.selection.secondaryContextIDs.join(",") || "none";
                     console.error(`RLM lane routing active=${routed.activeContextCount} primary=${routed.selection.primaryContextID} secondary=${secondaries} created=${routed.selection.createdNewContext}`);
                 }
-                const laneTokenEstimate = estimateConversationTokens(historyForTransform);
+                laneTokenEstimate = estimateConversationTokens(historyForTransform);
                 const laneSavedTokens = Math.max(0, baselineTokenEstimate - laneTokenEstimate);
+                recordLaneTelemetry(sessionStats, {
+                    at: now,
+                    baselineTokens: baselineTokenEstimate,
+                    laneScopedTokens: laneTokenEstimate,
+                    historyMessages: history.length,
+                    laneHistoryMessages: historyForTransform.length,
+                    primaryContextID: routed.selection.primaryContextID,
+                    createdNewContext: routed.selection.createdNewContext,
+                });
                 sessionStats.laneRoutingSamples += 1;
                 sessionStats.totalBaselineTokens += baselineTokenEstimate;
                 sessionStats.totalLaneScopedTokens += laneTokenEstimate;
                 sessionStats.totalLaneSavedTokens += laneSavedTokens;
                 sessionStats.lastLaneScopedTokenEstimate = laneTokenEstimate;
                 sessionStats.lastLaneSavedTokens = laneSavedTokens;
+                const primaryOwnerRoute = ownerRoutes.find((route) => route.isPrimary) ?? null;
+                const delegation = primaryOwnerRoute
+                    ? {
+                        ownerSessionID: primaryOwnerRoute.ownerSessionID,
+                        openCommand: `opencode -s ${primaryOwnerRoute.ownerSessionID}`,
+                        mode: "reuse-existing-owner-session",
+                    }
+                    : null;
+                recordProgress("routing.completed", {
+                    primaryContextID: routed.selection.primaryContextID,
+                    secondaryContextIDs: routed.selection.secondaryContextIDs,
+                    createdNewContext: routed.selection.createdNewContext,
+                    ownerRoutes,
+                    laneHistoryMessages: historyForTransform.length,
+                    delegation,
+                });
+                if (config.laneBucketsUseSessions) {
+                    await notifyOwnerSessions(sessionID, latestUserText, ownerRoutes);
+                    if (ownerRoutes.length > 0) {
+                        recordProgress("delegation.notified-owner-session", {
+                            ownerSessionIDs: ownerRoutes.map((route) => route.ownerSessionID),
+                        });
+                    }
+                }
             }
+            laneStore.saveContextSnapshot(sessionID, messageID, "model-input", 0, stringifyDetail({
+                primaryContextID: routedPrimaryContextID,
+                baselineTokenEstimate,
+                laneTokenEstimate,
+                history: historySnapshotPayload(historyForTransform),
+            }), Date.now());
+            recordProgress("context.prepared", {
+                historyMessages: historyForTransform.length,
+                primaryContextID: routedPrimaryContextID,
+            });
             const run = config.backend === "opencode"
                 ? await computeFocusedContext(historyForTransform, config, null, async (archiveContext, latestGoal, runtimeConfig) => {
                     return generateFocusedContextWithOpenCodeAuth({
@@ -300,12 +601,27 @@ const plugin = (async (ctx) => {
                 sessionStats.compactionsSkipped += 1;
                 sessionStats.lastFocusedChars = 0;
                 sessionStats.lastDecision = run.pressure < config.pressureThreshold ? "skipped-pressure" : "skipped-no-focused-context";
+                recordProgress("compaction.skipped", {
+                    pressure: run.pressure,
+                    tokenEstimate: run.tokenEstimate,
+                    reason: sessionStats.lastDecision,
+                });
                 return;
             }
             prependFocusedContext(parts, run.focusedContext);
             sessionStats.compactionsApplied += 1;
             sessionStats.lastFocusedChars = run.focusedContext.length;
             sessionStats.lastDecision = "compacted";
+            laneStore.saveContextSnapshot(sessionID, messageID, "focused-context", 0, stringifyDetail({
+                focusedContext: run.focusedContext,
+                pressure: run.pressure,
+                tokenEstimate: run.tokenEstimate,
+            }), Date.now());
+            recordProgress("compaction.applied", {
+                focusedContextChars: run.focusedContext.length,
+                pressure: run.pressure,
+                tokenEstimate: run.tokenEstimate,
+            });
         },
     };
 });

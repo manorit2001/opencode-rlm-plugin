@@ -148,6 +148,7 @@ Context lanes keep multiple active work buckets and route each message to the mo
 - Primary lane: highest-confidence context for the current message.
 - Secondary lanes: additional high-similarity lanes for cross-topic overlap.
 - Lane-scoped history: focused-context generation runs on lane-filtered history plus recent messages.
+- Optional session-backed lanes: when enabled, each new lane is created as a child OpenCode session and uses title format `<prefix>: <lane-title>` for `/sessions` visibility.
 
 Lane utilities (plugin tools):
 
@@ -198,6 +199,8 @@ Lane utilities (plugin tools):
 - `RLM_PLUGIN_LANES_SEMANTIC_AMBIGUITY_TOP_SCORE` (default `0.62`)
 - `RLM_PLUGIN_LANES_SEMANTIC_AMBIGUITY_GAP` (default `0.08`)
 - `RLM_PLUGIN_LANES_DB_PATH` (default `.opencode/rlm-context-lanes.sqlite`)
+- `RLM_PLUGIN_LANES_SESSION_BUCKETS_ENABLED` (default `0`; creates session-backed context lanes)
+- `RLM_PLUGIN_LANES_SESSION_TITLE_PREFIX` (default `Project`; used as `<prefix>: <lane-title>`)
 
 ## Visible Narrowing Test
 

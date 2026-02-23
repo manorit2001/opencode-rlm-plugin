@@ -22,7 +22,18 @@ export const DEFAULT_CONFIG = {
     laneSemanticWeight: 0.2,
     laneSemanticAmbiguityTopScore: 0.62,
     laneSemanticAmbiguityGap: 0.08,
+    laneMinHistoryTokenRatio: 0.75,
+    laneVisualizationSessionLimit: 8,
+    laneVisualizationContextLimit: 16,
+    laneVisualizationSwitchLimit: 60,
+    laneVisualizationMembershipLimit: 240,
+    laneVisualizationOutputPath: ".opencode/rlm-context-lanes-visualization.html",
+    laneVisualizationWebHost: "127.0.0.1",
+    laneVisualizationWebPort: 3799,
+    laneVisualizationWebBasePath: "/",
     laneDbPath: ".opencode/rlm-context-lanes.sqlite",
+    laneBucketsUseSessions: false,
+    laneSessionTitlePrefix: "Project",
     keepRecentMessages: 8,
     maxArchiveChars: 60000,
     maxFocusedContextChars: 4500,
@@ -102,7 +113,18 @@ export function getConfig() {
     const laneSemanticWeight = clamp(readNumber("RLM_PLUGIN_LANES_SEMANTIC_WEIGHT", DEFAULT_CONFIG.laneSemanticWeight), 0, 1);
     const laneSemanticAmbiguityTopScore = clamp(readNumber("RLM_PLUGIN_LANES_SEMANTIC_AMBIGUITY_TOP_SCORE", DEFAULT_CONFIG.laneSemanticAmbiguityTopScore), 0.05, 0.99);
     const laneSemanticAmbiguityGap = clamp(readNumber("RLM_PLUGIN_LANES_SEMANTIC_AMBIGUITY_GAP", DEFAULT_CONFIG.laneSemanticAmbiguityGap), 0, 0.5);
+    const laneMinHistoryTokenRatio = clamp(readNumber("RLM_PLUGIN_LANES_MIN_HISTORY_TOKEN_RATIO", DEFAULT_CONFIG.laneMinHistoryTokenRatio ?? 0.75), 0, 1);
+    const laneVisualizationSessionLimit = Math.max(1, Math.floor(readNumber("RLM_PLUGIN_LANES_VIS_SESSION_LIMIT", DEFAULT_CONFIG.laneVisualizationSessionLimit ?? 8)));
+    const laneVisualizationContextLimit = Math.max(1, Math.floor(readNumber("RLM_PLUGIN_LANES_VIS_CONTEXT_LIMIT", DEFAULT_CONFIG.laneVisualizationContextLimit ?? 16)));
+    const laneVisualizationSwitchLimit = Math.max(1, Math.floor(readNumber("RLM_PLUGIN_LANES_VIS_SWITCH_LIMIT", DEFAULT_CONFIG.laneVisualizationSwitchLimit ?? 60)));
+    const laneVisualizationMembershipLimit = Math.max(1, Math.floor(readNumber("RLM_PLUGIN_LANES_VIS_MEMBERSHIP_LIMIT", DEFAULT_CONFIG.laneVisualizationMembershipLimit ?? 240)));
+    const laneVisualizationOutputPath = readString("RLM_PLUGIN_LANES_VIS_OUTPUT_PATH", DEFAULT_CONFIG.laneVisualizationOutputPath ?? ".opencode/rlm-context-lanes-visualization.html");
+    const laneVisualizationWebHost = readString("RLM_PLUGIN_LANES_VIS_WEB_HOST", DEFAULT_CONFIG.laneVisualizationWebHost ?? "127.0.0.1");
+    const laneVisualizationWebPort = Math.max(1, Math.floor(readNumber("RLM_PLUGIN_LANES_VIS_WEB_PORT", DEFAULT_CONFIG.laneVisualizationWebPort ?? 3799)));
+    const laneVisualizationWebBasePath = readString("RLM_PLUGIN_LANES_VIS_WEB_BASE_PATH", DEFAULT_CONFIG.laneVisualizationWebBasePath ?? "/");
     const laneDbPath = readString("RLM_PLUGIN_LANES_DB_PATH", DEFAULT_CONFIG.laneDbPath);
+    const laneBucketsUseSessions = readBoolean("RLM_PLUGIN_LANES_SESSION_BUCKETS_ENABLED", DEFAULT_CONFIG.laneBucketsUseSessions ?? false);
+    const laneSessionTitlePrefix = readString("RLM_PLUGIN_LANES_SESSION_TITLE_PREFIX", DEFAULT_CONFIG.laneSessionTitlePrefix ?? "Project");
     const keepRecentMessages = Math.max(2, Math.floor(readNumber("RLM_PLUGIN_KEEP_RECENT", DEFAULT_CONFIG.keepRecentMessages)));
     const maxArchiveChars = Math.max(2000, Math.floor(readNumber("RLM_PLUGIN_MAX_ARCHIVE_CHARS", DEFAULT_CONFIG.maxArchiveChars)));
     const maxFocusedContextChars = Math.max(500, Math.floor(readNumber("RLM_PLUGIN_MAX_FOCUSED_CHARS", DEFAULT_CONFIG.maxFocusedContextChars)));
@@ -142,7 +164,18 @@ export function getConfig() {
         laneSemanticWeight,
         laneSemanticAmbiguityTopScore,
         laneSemanticAmbiguityGap,
+        laneMinHistoryTokenRatio,
+        laneVisualizationSessionLimit,
+        laneVisualizationContextLimit,
+        laneVisualizationSwitchLimit,
+        laneVisualizationMembershipLimit,
+        laneVisualizationOutputPath,
+        laneVisualizationWebHost,
+        laneVisualizationWebPort,
+        laneVisualizationWebBasePath,
         laneDbPath,
+        laneBucketsUseSessions,
+        laneSessionTitlePrefix,
         keepRecentMessages,
         maxArchiveChars,
         maxFocusedContextChars,

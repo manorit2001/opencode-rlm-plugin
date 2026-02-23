@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { computeFocusedContext } from "../lib/transform.js";
 const BASE_CONFIG = {
     enabled: true,
@@ -168,4 +169,113 @@ test("computeFocusedContext does not trigger when drift score says no drift", as
     assert.equal(called, false);
     assert.equal(run.compacted, false);
     assert.equal(run.focusedContext, null);
+});
+test("computeFocusedContext uses latest compacted context as canonical archive vector", async () => {
+    const messages = [
+        textMessage("user", "Legacy thread detail: old migration checklist."),
+        textMessage("assistant", "Legacy thread detail: old cache notes."),
+        textMessage("user", [
+            "[RLM_FOCUSED_CONTEXT]",
+            "Focused summary: keep KV continuity for migration lane.",
+            "- preserve context routing stability",
+            "- reuse focused vector after compaction",
+            "",
+            "Continue migration work with stable cache behavior.",
+        ].join("\n")),
+        textMessage("assistant", "Post-compaction update: add regression tests for cache continuity."),
+        textMessage("user", "Current goal: validate cache hits after compaction."),
+    ];
+    let archiveArg = "";
+    const run = await computeFocusedContext(messages, {
+        ...BASE_CONFIG,
+        pressureThreshold: 0.1,
+        keepRecentMessages: 1,
+    }, 20, async (archiveContext) => {
+        archiveArg = archiveContext;
+        return { focusedContext: "Focused: keep post-compaction cache hits stable." };
+    });
+    assert.equal(run.compacted, true);
+    assert.ok(archiveArg.includes("Focused summary: keep KV continuity for migration lane."));
+    assert.ok(archiveArg.includes("Post-compaction update: add regression tests for cache continuity."));
+    assert.equal(archiveArg.includes("Legacy thread detail: old migration checklist."), false);
+    assert.equal(archiveArg.includes("Legacy thread detail: old cache notes."), false);
+});
+test("computeFocusedContext keeps post-compaction archive deterministic across replays", async () => {
+    const messages = [
+        textMessage("assistant", "Historic context: lane scoring details."),
+        textMessage("user", [
+            "[RLM_FOCUSED_CONTEXT]",
+            "Focused summary: lane A is the canonical cache vector.",
+            "- preserve deterministic arrival order",
+            "",
+            "Continue with lane A validations.",
+        ].join("\n")),
+        textMessage("assistant", "Loop checkpoint: keep lane A stable."),
+        textMessage("user", "Loop checkpoint: keep lane A stable."),
+    ];
+    const archives = [];
+    async function runOnce() {
+        await computeFocusedContext(messages, {
+            ...BASE_CONFIG,
+            pressureThreshold: 0.1,
+            keepRecentMessages: 1,
+        }, 20, async (archiveContext) => {
+            archives.push(archiveContext);
+            return { focusedContext: "Focused: preserve lane A continuity." };
+        });
+    }
+    await runOnce();
+    await runOnce();
+    assert.equal(archives.length, 2);
+    assert.equal(archives[0], archives[1]);
+    assert.ok(archives[0].includes("Focused summary: lane A is the canonical cache vector."));
+    assert.equal(archives[0].includes("Historic context: lane scoring details."), false);
+});
+test("computeFocusedContext preserves post-compaction KV fingerprint continuity", async () => {
+    const focusedVector = [
+        "[RLM_FOCUSED_CONTEXT]",
+        "Focused summary: bucket-alpha canonical KV vector.",
+        "- preserve lane routing continuity",
+        "- preserve cache hit continuity after compaction",
+        "",
+        "Continue bucket-alpha work.",
+    ].join("\n");
+    const replayMessages = [
+        textMessage("assistant", "Pre-compaction detail: stale backlog 2024-Q2."),
+        textMessage("assistant", "Pre-compaction detail: stale cache misses list."),
+        textMessage("user", focusedVector),
+        textMessage("assistant", "RLM loop checkpoint 1: continue bucket-alpha validations."),
+        textMessage("user", "RLM loop checkpoint 2: continue bucket-alpha validations."),
+    ];
+    async function captureFingerprint(messages) {
+        let archive = "";
+        const run = await computeFocusedContext(messages, {
+            ...BASE_CONFIG,
+            pressureThreshold: 0.1,
+            keepRecentMessages: 1,
+        }, 20, async (archiveContext) => {
+            archive = archiveContext;
+            return { focusedContext: "Focused: keep bucket-alpha continuity stable." };
+        });
+        assert.equal(run.compacted, true);
+        return {
+            archive,
+            fingerprint: createHash("sha256").update(archive).digest("hex"),
+        };
+    }
+    const replayA = await captureFingerprint(replayMessages);
+    const replayB = await captureFingerprint(replayMessages);
+    assert.equal(replayA.fingerprint, replayB.fingerprint);
+    assert.ok(replayA.archive.includes("Focused summary: bucket-alpha canonical KV vector."));
+    assert.equal(replayA.archive.includes("Pre-compaction detail: stale backlog 2024-Q2."), false);
+    assert.equal(replayA.archive.includes("Pre-compaction detail: stale cache misses list."), false);
+    const nextBucketMessages = [
+        textMessage("assistant", "Pre-compaction detail: stale backlog 2024-Q2."),
+        textMessage("assistant", "Pre-compaction detail: stale cache misses list."),
+        textMessage("user", focusedVector.replace("Focused summary: bucket-alpha canonical KV vector.", "Focused summary: bucket-beta canonical KV vector.")),
+        textMessage("assistant", "RLM loop checkpoint 1: continue bucket-beta validations."),
+        textMessage("user", "RLM loop checkpoint 2: continue bucket-beta validations."),
+    ];
+    const nextBucket = await captureFingerprint(nextBucketMessages);
+    assert.notEqual(nextBucket.fingerprint, replayA.fingerprint);
 });

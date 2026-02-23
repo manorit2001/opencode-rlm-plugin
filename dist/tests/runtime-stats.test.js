@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createSessionRuntimeStats, formatRuntimeStats, formatTokenEfficiencyStats } from "../lib/runtime-stats.js";
+import { createSessionRuntimeStats, formatRuntimeStats, formatTokenEfficiencyStats, recordLaneTelemetry, } from "../lib/runtime-stats.js";
 test("formatRuntimeStats reports zero-safe rates", () => {
     const stats = createSessionRuntimeStats(1000);
     const text = formatRuntimeStats(stats, {
@@ -57,6 +57,8 @@ test("formatTokenEfficiencyStats reports zero-safe token savings", () => {
     assert.ok(text.includes("RLM Token Efficiency (estimated, current plugin process)"));
     assert.ok(text.includes("Estimated tokens saved by routing: 0"));
     assert.ok(text.includes("Estimated routing savings rate: 0.0%"));
+    assert.ok(text.includes("Last lane token ratio: 0.0%"));
+    assert.ok(text.includes("Abrupt lane drops (>=20.0pp): 0"));
     assert.ok(text.includes("Switch events sampled: 0"));
 });
 test("formatTokenEfficiencyStats reports route savings and switch reasons", () => {
@@ -69,6 +71,24 @@ test("formatTokenEfficiencyStats reports route savings and switch reasons", () =
     stats.lastBaselineTokenEstimate = 3600;
     stats.lastLaneScopedTokenEstimate = 2500;
     stats.lastLaneSavedTokens = 1100;
+    recordLaneTelemetry(stats, {
+        at: 4100,
+        baselineTokens: 3000,
+        laneScopedTokens: 2400,
+        historyMessages: 30,
+        laneHistoryMessages: 20,
+        primaryContextID: "lane-1",
+        createdNewContext: false,
+    });
+    recordLaneTelemetry(stats, {
+        at: 4200,
+        baselineTokens: 3000,
+        laneScopedTokens: 1500,
+        historyMessages: 31,
+        laneHistoryMessages: 12,
+        primaryContextID: "lane-1",
+        createdNewContext: false,
+    });
     const text = formatTokenEfficiencyStats(stats, {
         activeContextCount: 4,
         switchEvents: [
@@ -92,6 +112,12 @@ test("formatTokenEfficiencyStats reports route savings and switch reasons", () =
     assert.ok(text.includes("Last baseline token estimate: 3600"));
     assert.ok(text.includes("Last lane-scoped token estimate: 2500"));
     assert.ok(text.includes("Last estimated route savings: 1100"));
+    assert.ok(text.includes("Last lane token ratio: 50.0%"));
+    assert.ok(text.includes("Last lane ratio delta: -30.0pp"));
+    assert.ok(text.includes("Lane token ratio range: 50.0%..80.0%"));
+    assert.ok(text.includes("Abrupt lane drops (>=20.0pp): 1"));
     assert.ok(text.includes("Switch events sampled: 5"));
     assert.ok(text.includes("Switch reasons: score-switch=3, manual-override=1, created-new-context=1"));
+    assert.ok(text.includes("Recent lane telemetry: t=4100 ratio=80.0%"));
+    assert.ok(text.includes("t=4200 ratio=50.0% delta=-30.0pp baseline=3000 lane=1500 msgs=12/31"));
 });

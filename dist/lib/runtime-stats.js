@@ -1,3 +1,5 @@
+const DEFAULT_ABRUPT_DROP_THRESHOLD = 0.2;
+const MAX_LANE_TELEMETRY_SAMPLES = 20;
 export function createSessionRuntimeStats(now) {
     return {
         firstSeenAt: now,
@@ -17,10 +19,57 @@ export function createSessionRuntimeStats(now) {
         lastBaselineTokenEstimate: 0,
         lastLaneScopedTokenEstimate: 0,
         lastLaneSavedTokens: 0,
+        lastLaneTokenRatio: 0,
+        lastLaneTokenRatioDelta: 0,
+        minLaneTokenRatio: 0,
+        maxLaneTokenRatio: 0,
+        abruptLaneDropCount: 0,
+        laneTelemetry: [],
         lastTokenEstimate: 0,
         lastFocusedChars: 0,
         lastDecision: "none",
     };
+}
+function clamp(value, min, max) {
+    if (!Number.isFinite(value)) {
+        return min;
+    }
+    return Math.max(min, Math.min(max, value));
+}
+export function recordLaneTelemetry(stats, sample, abruptDropThreshold = DEFAULT_ABRUPT_DROP_THRESHOLD) {
+    const ratio = sample.baselineTokens <= 0 ? 1 : sample.laneScopedTokens / sample.baselineTokens;
+    const laneRatio = clamp(ratio, 0, 1);
+    const hasPrevious = stats.laneTelemetry.length > 0;
+    const previousRatio = hasPrevious ? stats.lastLaneTokenRatio : laneRatio;
+    const laneRatioDelta = laneRatio - previousRatio;
+    if (hasPrevious) {
+        stats.minLaneTokenRatio = Math.min(stats.minLaneTokenRatio, laneRatio);
+        stats.maxLaneTokenRatio = Math.max(stats.maxLaneTokenRatio, laneRatio);
+    }
+    else {
+        stats.minLaneTokenRatio = laneRatio;
+        stats.maxLaneTokenRatio = laneRatio;
+    }
+    stats.lastLaneTokenRatio = laneRatio;
+    stats.lastLaneTokenRatioDelta = laneRatioDelta;
+    const threshold = clamp(abruptDropThreshold, 0, 1);
+    if (hasPrevious && laneRatioDelta <= -threshold) {
+        stats.abruptLaneDropCount += 1;
+    }
+    stats.laneTelemetry.push({
+        at: sample.at,
+        baselineTokens: sample.baselineTokens,
+        laneScopedTokens: sample.laneScopedTokens,
+        laneRatio,
+        laneRatioDelta,
+        historyMessages: sample.historyMessages,
+        laneHistoryMessages: sample.laneHistoryMessages,
+        primaryContextID: sample.primaryContextID,
+        createdNewContext: sample.createdNewContext,
+    });
+    if (stats.laneTelemetry.length > MAX_LANE_TELEMETRY_SAMPLES) {
+        stats.laneTelemetry.splice(0, stats.laneTelemetry.length - MAX_LANE_TELEMETRY_SAMPLES);
+    }
 }
 function toPercent(numerator, denominator) {
     if (denominator <= 0) {
@@ -76,6 +125,18 @@ export function formatTokenEfficiencyStats(stats, details) {
     const avgBaseline = toFixedRatio(stats.totalBaselineTokens, stats.laneRoutingSamples);
     const avgLaneScoped = toFixedRatio(stats.totalLaneScopedTokens, stats.laneRoutingSamples);
     const avgSaved = toFixedRatio(stats.totalLaneSavedTokens, stats.laneRoutingSamples);
+    const hasTelemetry = stats.laneTelemetry.length > 0;
+    const minRatio = hasTelemetry ? stats.minLaneTokenRatio : 0;
+    const maxRatio = hasTelemetry ? stats.maxLaneTokenRatio : 0;
+    const recentTelemetry = stats.laneTelemetry
+        .slice(-5)
+        .map((sample) => {
+        const ratio = (sample.laneRatio * 100).toFixed(1);
+        const delta = (sample.laneRatioDelta * 100).toFixed(1);
+        const primary = sample.primaryContextID ?? "none";
+        const newFlag = sample.createdNewContext ? "yes" : "no";
+        return `t=${sample.at} ratio=${ratio}% delta=${delta}pp baseline=${sample.baselineTokens} lane=${sample.laneScopedTokens} msgs=${sample.laneHistoryMessages}/${sample.historyMessages} primary=${primary} new=${newFlag}`;
+    });
     const lines = [
         "RLM Token Efficiency (estimated, current plugin process)",
         `Lane routing runs: ${stats.laneRoutingRuns}`,
@@ -91,8 +152,15 @@ export function formatTokenEfficiencyStats(stats, details) {
         `Last baseline token estimate: ${stats.lastBaselineTokenEstimate}`,
         `Last lane-scoped token estimate: ${stats.lastLaneScopedTokenEstimate}`,
         `Last estimated route savings: ${stats.lastLaneSavedTokens}`,
+        `Last lane token ratio: ${(stats.lastLaneTokenRatio * 100).toFixed(1)}%`,
+        `Last lane ratio delta: ${(stats.lastLaneTokenRatioDelta * 100).toFixed(1)}pp`,
+        `Lane token ratio range: ${(minRatio * 100).toFixed(1)}%..${(maxRatio * 100).toFixed(1)}%`,
+        `Abrupt lane drops (>=${(DEFAULT_ABRUPT_DROP_THRESHOLD * 100).toFixed(1)}pp): ${stats.abruptLaneDropCount}`,
         `Switch events sampled: ${totalSwitches}`,
         `Switch reasons: score-switch=${reasonCounts["score-switch"]}, manual-override=${reasonCounts["manual-override"]}, created-new-context=${reasonCounts["created-new-context"]}`,
     ];
+    if (recentTelemetry.length > 0) {
+        lines.push(`Recent lane telemetry: ${recentTelemetry.join(" | ")}`);
+    }
     return lines.join("\n");
 }
